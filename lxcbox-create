@@ -1,0 +1,383 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+#
+# lxcbox-create — distrobox-create rewritten for LXC backend
+# Part of the lxcbox project (Alpine Host + LXC + Debian container)
+#
+# Replaces: podman/docker/lilipod
+# Requires: lxc, lxc-utils, debootstrap (on host)
+
+# ── Env setup ────────────────────────────────────────────────────────────────
+[ -z "${USER}" ]  && USER="$(id -run)"
+[ -z "${HOME}" ]  && HOME="$(getent passwd "${USER}" | cut -d':' -f6)"
+[ -z "${SHELL}" ] && SHELL="$(getent passwd "${USER}" | cut -d':' -f7)"
+
+# ── Defaults ──────────────────────────────────────────────────────────────────
+container_name=""
+container_name_default="my-lxcbox"
+container_image="debian"
+container_image_release="bookworm"
+container_hostname=""
+container_user_name="${USER}"
+container_user_uid="$(id -ru)"
+container_user_gid="$(id -rg)"
+container_user_home="${HOME:-"/"}"
+container_user_custom_home=""
+container_home_prefix=""
+container_additional_packages=""
+container_init_hook=""
+container_pre_init_hook=""
+container_additional_volumes=""
+container_manager_additional_flags=""
+
+# LXC state dir — rootful uses /var/lib/lxc, rootless uses ~/.local/share/lxc
+[ "$(id -ru)" -eq 0 ] && rootful=1 || rootful=0
+[ "${rootful}" -eq 1 ] \
+    && lxc_dir="/var/lib/lxc" \
+    || lxc_dir="${HOME}/.local/share/lxc"
+
+lxcbox_metadata_dir="${HOME}/.local/share/lxcbox"
+
+dryrun=0
+non_interactive=0
+verbose=0
+version="0.1.0"
+
+# Paths to lxcbox helper scripts (same dir as this script, or PATH)
+script_dir="$(cd "$(dirname "${0}")" && pwd)"
+lxcbox_init_path="${script_dir}/lxcbox-init"
+lxcbox_export_path="${script_dir}/lxcbox-export"
+lxcbox_hostexec_path="${script_dir}/lxcbox-host-exec"
+[ ! -e "${lxcbox_init_path}" ]    && lxcbox_init_path="$(command -v lxcbox-init 2>/dev/null || true)"
+[ ! -e "${lxcbox_export_path}" ]  && lxcbox_export_path="$(command -v lxcbox-export 2>/dev/null || true)"
+[ ! -e "${lxcbox_hostexec_path}" ] && lxcbox_hostexec_path="$(command -v lxcbox-host-exec 2>/dev/null || true)"
+
+# ── Config file loading (same hierarchy as distrobox) ────────────────────────
+config_files="
+    /usr/share/lxcbox/lxcbox.conf
+    /etc/lxcbox/lxcbox.conf
+    ${XDG_CONFIG_HOME:-"${HOME}/.config"}/lxcbox/lxcbox.conf
+    ${HOME}/.lxcboxrc
+"
+for config_file in ${config_files}; do
+    # shellcheck disable=SC1090
+    [ -e "${config_file}" ] && . "$(realpath "${config_file}")"
+done
+
+distrobox_sudo_program=${DBX_SUDO_PROGRAM:-${distrobox_sudo_program:-"sudo"}}
+
+# ── show_help ────────────────────────────────────────────────────────────────
+show_help()
+{
+    cat << EOF
+lxcbox version: ${version}
+
+Usage:
+    lxcbox-create --name mybox
+    lxcbox-create --name mybox --release trixie
+    lxcbox-create --name mybox --home ~/boxes/mybox
+    lxcbox-create --name mybox --volume /mnt/data:/mnt/data
+    lxcbox-create --name mybox --additional-packages "git vim tmux"
+    lxcbox-create --name mybox --init-hooks "echo done"
+
+Options:
+    --name/-n:              name for the container          default: ${container_name_default}
+    --release/-R:           Debian release to bootstrap     default: ${container_image_release}
+    --hostname:             hostname for the container      default: <container-name>
+    --home/-H:              custom HOME path inside host    default: ${HOME}
+    --volume:               extra volumes  host:container[:opts]
+    --additional-packages:  packages to install on first init
+    --init-hooks:           commands to run at end of init
+    --pre-init-hooks:       commands to run at start of init
+    --additional-flags/-a:  extra lxc-start flags (advanced)
+    --root/-r:              use root LXC (/var/lib/lxc)
+    --dry-run/-d:           print generated config, do not create
+    --yes/-Y:               non-interactive
+    --verbose/-v:           show more output
+    --version/-V:           show version
+    --help/-h:              this message
+EOF
+}
+
+# ── Argument parsing ──────────────────────────────────────────────────────────
+while :; do
+    case $1 in
+        -h | --help)       show_help; exit 0 ;;
+        -v | --verbose)    verbose=1; shift ;;
+        -V | --version)    printf "lxcbox: %s\n" "${version}"; exit 0 ;;
+        -d | --dry-run)    dryrun=1; shift ;;
+        -r | --root)       rootful=1; lxc_dir="/var/lib/lxc"; shift ;;
+        -Y | --yes)        non_interactive=1; shift ;;
+        -n | --name)
+            [ -n "$2" ] && { container_name="$2"; shift 2; } ;;
+        -R | --release)
+            [ -n "$2" ] && { container_image_release="$2"; shift 2; } ;;
+        --hostname)
+            [ -n "$2" ] && { container_hostname="$2"; shift 2; } ;;
+        -H | --home)
+            [ -n "$2" ] && { container_user_custom_home="$(echo "$2" | sed 's:/*$::')"; shift 2; } ;;
+        --volume)
+            [ -n "$2" ] && { container_additional_volumes="${container_additional_volumes} $2"; shift 2; } ;;
+        -a | --additional-flags)
+            [ -n "$2" ] && { container_manager_additional_flags="${container_manager_additional_flags} $2"; shift 2; } ;;
+        --additional-packages)
+            [ -n "$2" ] && { container_additional_packages="$2"; shift 2; } ;;
+        --init-hooks)
+            [ -n "$2" ] && { container_init_hook="$2"; shift 2; } ;;
+        --pre-init-hooks)
+            [ -n "$2" ] && { container_pre_init_hook="$2"; shift 2; } ;;
+        --) shift; break ;;
+        -*) printf >&2 "ERROR: unknown flag '%s'\n" "$1"; show_help; exit 1 ;;
+        *)
+            if [ -n "$1" ]; then container_name="$1"; shift
+            else break; fi ;;
+    esac
+done
+
+set -o errexit
+set -o nounset
+[ "${verbose}" -ne 0 ] && set -o xtrace
+
+# ── Resolve defaults ──────────────────────────────────────────────────────────
+[ -z "${container_name}" ] && container_name="${container_name_default}"
+[ -z "${container_hostname}" ] && container_hostname="${container_name}"
+
+# Effective home to bind-mount
+effective_home="${container_user_custom_home:-"${container_user_home}"}"
+
+# LXC container rootfs path
+container_rootfs="${lxc_dir}/${container_name}/rootfs"
+container_config="${lxc_dir}/${container_name}/config"
+
+# ── Dependency check ─────────────────────────────────────────────────────────
+for dep in lxc-create lxc-start lxc-info debootstrap; do
+    if ! command -v "${dep}" > /dev/null 2>&1; then
+        printf >&2 "ERROR: missing dependency: %s\n" "${dep}"
+        exit 127
+    fi
+done
+
+# ── Check container already exists ───────────────────────────────────────────
+if [ -d "${lxc_dir}/${container_name}" ]; then
+    printf "lxcbox '%s' already exists.\n" "${container_name}"
+    printf "To enter, run:\n\n  lxcbox-enter %s\n\n" "${container_name}"
+    exit 0
+fi
+
+# ── generate_lxc_config ───────────────────────────────────────────────────────
+# Produces the LXC config file content (printed to stdout).
+# This replaces distrobox's generate_create_command().
+#
+# Key design decisions vs Podman:
+#   - No OCI image pull; we bootstrap Debian with debootstrap
+#   - Config is a persistent file, not a CLI invocation
+#   - Mounts expressed as lxc.mount.entry lines
+#   - Network sharing via lxc.net.0.type = none (shares host netns)
+#   - PID sharing via lxc.namespace.share.pid = 1
+#   - Wayland + PipeWire sockets forwarded via bind mounts
+# ─────────────────────────────────────────────────────────────────────────────
+generate_lxc_config()
+{
+    wayland_display="${WAYLAND_DISPLAY:-wayland-0}"
+    xdg_runtime="/run/user/${container_user_uid}"
+    wayland_socket="${xdg_runtime}/${wayland_display}"
+    pipewire_socket="${xdg_runtime}/pipewire-0"
+    pulse_socket="${xdg_runtime}/pulse/native"
+
+    cat << LXCCONF
+# lxcbox config — generated by lxcbox-create ${version}
+# Container: ${container_name}
+
+# ── Identity ──────────────────────────────────────────────────────────────────
+lxc.uts.name = ${container_hostname}
+
+# ── Init ──────────────────────────────────────────────────────────────────────
+# lxcbox-init is bind-mounted in at /usr/bin/lxcbox-init
+# It runs as root, sets up the user, then drops to user shell.
+lxc.init.cmd = /usr/bin/lxcbox-init \\
+    --name "${container_user_name}" \\
+    --user ${container_user_uid} \\
+    --group ${container_user_gid} \\
+    --home "${effective_home}" \\
+    --additional-packages "${container_additional_packages}" \\
+    --pre-init-hooks "${container_pre_init_hook}" \\
+    -- '${container_init_hook}'
+
+# ── Capabilities / security ───────────────────────────────────────────────────
+# Keep all caps (privileged-equivalent) — same as distrobox --privileged
+lxc.cap.drop =
+lxc.apparmor.profile = unconfined
+
+# ── Namespace sharing (distrobox defaults) ────────────────────────────────────
+# Share host network namespace (no virtual NIC, full host network)
+lxc.net.0.type = none
+
+# Share host PID namespace so host processes are visible
+lxc.namespace.share.pid = 1
+
+# Share host IPC namespace
+lxc.namespace.share.ipc = 1
+
+# ── Filesystem ────────────────────────────────────────────────────────────────
+lxc.rootfs.path = dir:${container_rootfs}
+
+# ── Core bind mounts ──────────────────────────────────────────────────────────
+# Syntax: lxc.mount.entry = <host-src> <container-dest> <fstype> <opts> 0 0
+# "none" as fstype + "bind" in opts = bind mount
+# "create=dir"  → auto-create mountpoint dir  in rootfs
+# "create=file" → auto-create mountpoint file in rootfs
+
+# Host root at /run/host (same as distrobox)
+lxc.mount.entry = / run/host none bind,ro,rslave,create=dir 0 0
+
+# /tmp shared with host
+lxc.mount.entry = /tmp tmp none bind,rw,rslave 0 0
+
+# /dev and /sys (hardware + kernel interfaces)
+lxc.mount.entry = /dev dev none bind,rw,rslave 0 0
+lxc.mount.entry = /sys sys none bind,rw,rslave 0 0
+
+# devpts — fresh instance inside container
+lxc.mount.entry = none dev/pts devpts defaults,newinstance,ptmxmode=0666,mode=0620 0 0
+
+# Networking files (keep in sync with host)
+lxc.mount.entry = /etc/hosts etc/hosts none bind,ro,create=file 0 0
+lxc.mount.entry = /etc/resolv.conf etc/resolv.conf none bind,ro,create=file 0 0
+lxc.mount.entry = /etc/hostname etc/hostname none bind,ro,create=file 0 0
+
+# User home (rw, rslave so submounts propagate)
+lxc.mount.entry = ${effective_home} ${effective_home#/} none bind,rw,rslave,create=dir 0 0
+
+# XDG_RUNTIME_DIR (needed by most GUI apps)
+lxc.mount.entry = ${xdg_runtime} ${xdg_runtime#/} none bind,rw,rslave,create=dir 0 0
+
+# ── Wayland socket ────────────────────────────────────────────────────────────
+$([ -S "${wayland_socket}" ] && printf "lxc.mount.entry = %s %s none bind,rw,create=file 0 0" \
+    "${wayland_socket}" "${wayland_socket#/}" || printf "# Wayland socket not found at %s (will bind when present)" "${wayland_socket}")
+
+# ── PipeWire socket ───────────────────────────────────────────────────────────
+$([ -S "${pipewire_socket}" ] && printf "lxc.mount.entry = %s %s none bind,rw,create=file 0 0" \
+    "${pipewire_socket}" "${pipewire_socket#/}" || printf "# PipeWire socket not found at %s (will bind when present)" "${pipewire_socket}")
+
+# ── PulseAudio compat socket (optional) ──────────────────────────────────────
+$([ -S "${pulse_socket}" ] && printf "lxc.mount.entry = %s %s none bind,rw,create=dir 0 0" \
+    "${pulse_socket%/native}" "${pulse_socket%/native}" || printf "# PulseAudio socket not found (optional)")
+
+# ── lxcbox helper scripts ─────────────────────────────────────────────────────
+$([ -n "${lxcbox_init_path}" ]    && printf "lxc.mount.entry = %s usr/bin/lxcbox-init none bind,ro,create=file 0 0" "${lxcbox_init_path}")
+$([ -n "${lxcbox_export_path}" ]  && printf "lxc.mount.entry = %s usr/bin/lxcbox-export none bind,ro,create=file 0 0" "${lxcbox_export_path}")
+$([ -n "${lxcbox_hostexec_path}" ] && printf "lxc.mount.entry = %s usr/bin/lxcbox-host-exec none bind,ro,create=file 0 0" "${lxcbox_hostexec_path}")
+
+# ── Additional volumes ────────────────────────────────────────────────────────
+$(for vol in ${container_additional_volumes:-}; do
+    host_path="$(echo "${vol}" | cut -d: -f1)"
+    cont_path="$(echo "${vol}" | cut -d: -f2)"
+    opts="$(echo "${vol}" | cut -d: -f3)"
+    opts="${opts:-rw}"
+    printf "lxc.mount.entry = %s %s none bind,%s,create=dir 0 0\n" \
+        "${host_path}" "${cont_path#/}" "${opts}"
+done)
+
+# ── Environment ───────────────────────────────────────────────────────────────
+lxc.environment = SHELL=$(basename "${SHELL:-/bin/bash}")
+lxc.environment = HOME=${effective_home}
+lxc.environment = USER=${container_user_name}
+lxc.environment = CONTAINER_ID=${container_name}
+lxc.environment = WAYLAND_DISPLAY=${wayland_display}
+lxc.environment = XDG_RUNTIME_DIR=${xdg_runtime}
+lxc.environment = TERMINFO_DIRS=/usr/share/terminfo:/run/host/usr/share/terminfo
+lxc.environment = DBUS_SESSION_BUS_ADDRESS=unix:path=${xdg_runtime}/bus
+
+# ── Labels (stored as lxcbox metadata) ───────────────────────────────────────
+# LXC has no native label system; lxcbox stores metadata separately.
+# See: ${lxcbox_metadata_dir}/${container_name}
+
+LXCCONF
+}
+
+# ── Bootstrap the Debian rootfs ───────────────────────────────────────────────
+bootstrap_rootfs()
+{
+    printf >&2 "Bootstrapping Debian %s into %s ...\n" "${container_image_release}" "${container_rootfs}"
+
+    mkdir -p "${container_rootfs}"
+
+    # Use debootstrap for the base system.
+    # Minimal set — lxcbox-init will install what's needed on first enter.
+    if [ "${rootful}" -eq 1 ]; then
+        debootstrap \
+            --variant=minbase \
+            --include=systemd-container,ca-certificates,locales \
+            "${container_image_release}" \
+            "${container_rootfs}" \
+            "http://deb.debian.org/debian"
+    else
+        # Rootless: fake-chroot via fakeroot+fakechroot (slower but no sudo needed)
+        if ! command -v fakeroot > /dev/null 2>&1 || ! command -v fakechroot > /dev/null 2>&1; then
+            printf >&2 "ERROR: rootless bootstrap requires fakeroot and fakechroot\n"
+            printf >&2 "Install with: sudo apk add fakeroot fakechroot\n"
+            exit 1
+        fi
+        fakechroot fakeroot debootstrap \
+            --variant=minbase \
+            "${container_image_release}" \
+            "${container_rootfs}" \
+            "http://deb.debian.org/debian"
+    fi
+}
+
+# ── write_metadata ────────────────────────────────────────────────────────────
+write_metadata()
+{
+    mkdir -p "${lxcbox_metadata_dir}"
+    cat > "${lxcbox_metadata_dir}/${container_name}" << META
+manager=lxcbox
+image=${container_image}:${container_image_release}
+name=${container_name}
+hostname=${container_hostname}
+home=${effective_home}
+uid=${container_user_uid}
+gid=${container_user_gid}
+created=$(date -Iseconds)
+META
+}
+
+# ── Dry run ───────────────────────────────────────────────────────────────────
+if [ "${dryrun}" -ne 0 ]; then
+    printf "# ── LXC config that would be written to %s ──\n" "${container_config}"
+    generate_lxc_config
+    printf "\n# ── debootstrap command that would run ──\n"
+    printf "debootstrap --variant=minbase --include=systemd-container,ca-certificates,locales %s %s http://deb.debian.org/debian\n" \
+        "${container_image_release}" "${container_rootfs}"
+    exit 0
+fi
+
+# ── Confirm ───────────────────────────────────────────────────────────────────
+if [ "${non_interactive}" -eq 0 ]; then
+    printf >&2 "About to create lxcbox '%s' (Debian %s) at %s\n" \
+        "${container_name}" "${container_image_release}" "${lxc_dir}/${container_name}"
+    printf >&2 "Continue? [Y/n]: "
+    read -r response
+    response="${response:-Y}"
+    case "${response}" in
+        y|Y|yes|Yes|YES) ;;
+        *) printf >&2 "Aborted.\n"; exit 0 ;;
+    esac
+fi
+
+# ── Create ────────────────────────────────────────────────────────────────────
+printf >&2 "Creating lxcbox '%s' ...\t" "${container_name}"
+
+# 1. Make container dir and write config
+mkdir -p "${lxc_dir}/${container_name}"
+generate_lxc_config > "${container_config}"
+
+# 2. Bootstrap Debian rootfs
+bootstrap_rootfs
+
+# 3. Write lxcbox metadata
+write_metadata
+
+printf >&2 "\033[32m[ OK ]\033[0m\n"
+printf >&2 "lxcbox '%s' created.\n" "${container_name}"
+printf >&2 "To enter, run:\n\n  lxcbox-enter %s\n\n" "${container_name}"

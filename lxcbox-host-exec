@@ -1,0 +1,65 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# lxcbox-host-exec — run a command on the HOST from inside the container
+# Replaces: distrobox-host-exec
+#
+# Strategy (same as distrobox):
+#   The host root is bind-mounted at /run/host.
+#   We use nsenter to escape the container's mount namespace and
+#   execute the command in the host's PID/mount/net namespace.
+#
+# Usage (inside container):
+#   lxcbox-host-exec ls /
+#   lxcbox-host-exec lxcbox-snapshot --auto mybox
+
+set -o errexit
+set -o nounset
+
+version="0.1.0"
+
+show_help() {
+    cat << EOF
+lxcbox-host-exec version: ${version}
+
+Run a command on the HOST from inside the container.
+
+Usage:
+    lxcbox-host-exec COMMAND [ARGS...]
+
+Examples:
+    lxcbox-host-exec ls /
+    lxcbox-host-exec lxcbox-snapshot --auto \${CONTAINER_ID}
+
+The host filesystem is accessible at /run/host.
+EOF
+}
+
+case "${1:-}" in
+    -h|--help) show_help; exit 0 ;;
+    -V|--version) printf "lxcbox-host-exec: %s\n" "${version}"; exit 0 ;;
+esac
+
+if [ "$#" -eq 0 ]; then
+    printf >&2 "ERROR: no command specified\n"
+    show_help; exit 1
+fi
+
+# /run/host/proc/1 is PID 1 on the host — nsenter into its namespaces.
+HOST_PID1_NS="/run/host/proc/1/ns"
+
+if [ ! -d "${HOST_PID1_NS}" ]; then
+    printf >&2 "ERROR: host proc not found at /run/host/proc\n"
+    printf >&2 "Is /run/host mounted? Check lxcbox-create config.\n"
+    exit 1
+fi
+
+# nsenter into host mount + pid + net namespaces, then exec command.
+# --wd keeps working directory. PATH is extended to include host paths.
+exec nsenter \
+    --mount="${HOST_PID1_NS}/mnt" \
+    --pid="${HOST_PID1_NS}/pid" \
+    --net="${HOST_PID1_NS}/net" \
+    --wd="$(pwd)" \
+    -- env \
+        PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH}" \
+    "$@"

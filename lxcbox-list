@@ -1,0 +1,85 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# lxcbox-list — list all lxcbox containers
+# Replaces: distrobox-list
+
+[ -z "${USER}" ]  && USER="$(id -run)"
+[ -z "${HOME}" ]  && HOME="$(getent passwd "${USER}" | cut -d':' -f6)"
+
+rootful=0
+verbose=0
+version="0.1.0"
+
+[ "$(id -ru)" -eq 0 ] && rootful=1
+[ "${rootful}" -eq 1 ] \
+    && lxc_dir="/var/lib/lxc" \
+    || lxc_dir="${HOME}/.local/share/lxc"
+
+lxcbox_metadata_dir="${HOME}/.local/share/lxcbox"
+distrobox_sudo_program=${DBX_SUDO_PROGRAM:-"sudo"}
+
+show_help() {
+    cat << EOF
+lxcbox-list version: ${version}
+
+List lxcbox containers.
+
+Usage:
+    lxcbox-list
+    lxcbox-list --root
+
+Options:
+    --root/-r:    show rootful containers (/var/lib/lxc)
+    --verbose/-v: verbose
+    --help/-h:    this message
+EOF
+}
+
+while :; do
+    case $1 in
+        -h|--help)    show_help; exit 0 ;;
+        -v|--verbose) verbose=1; shift ;;
+        -r|--root)    rootful=1; lxc_dir="/var/lib/lxc"; shift ;;
+        --) shift; break ;;
+        -*) printf >&2 "ERROR: unknown flag '%s'\n" "$1"; exit 1 ;;
+        *)  break ;;
+    esac
+done
+
+[ "${verbose}" -ne 0 ] && set -o xtrace
+
+lxc_info_cmd="lxc-info"
+[ "${rootful}" -eq 1 ] && lxc_info_cmd="${distrobox_sudo_program} lxc-info"
+
+# ── Print header ──────────────────────────────────────────────────────────────
+printf "%-24s  %-10s  %-20s  %s\n" "NAME" "STATUS" "IMAGE" "HOME"
+printf "%-24s  %-10s  %-20s  %s\n" "----" "------" "-----" "----"
+
+# ── Iterate lxcbox containers ─────────────────────────────────────────────────
+# A lxcbox container has a metadata file in lxcbox_metadata_dir.
+found=0
+for meta in "${lxcbox_metadata_dir}"/*; do
+    [ -e "${meta}" ] || continue
+    name="$(basename "${meta}")"
+
+    # Skip snapshot containers
+    case "${name}" in
+        *-snap-*|*-auto-snap-*) continue ;;
+    esac
+
+    # Read metadata
+    image="$(grep "^image=" "${meta}" 2>/dev/null | cut -d= -f2 || echo "unknown")"
+    home="$(grep  "^home="  "${meta}" 2>/dev/null | cut -d= -f2 || echo "unknown")"
+
+    # Get LXC status
+    state="$(${lxc_info_cmd} -n "${name}" 2>/dev/null \
+        | grep "^State:" | awk '{print $2}' || echo "STOPPED")"
+
+    printf "%-24s  %-10s  %-20s  %s\n" "${name}" "${state}" "${image}" "${home}"
+    found=1
+done
+
+if [ "${found}" -eq 0 ]; then
+    printf "No lxcbox containers found.\n"
+    printf "Create one with: lxcbox-create --name mybox\n"
+fi

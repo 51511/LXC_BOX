@@ -1,0 +1,169 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# lxcbox-export — export apps or binaries from container to host
+# Replaces: distrobox-export
+#
+# Modes:
+#   --app NAME     export a .desktop entry to host's ~/.local/share/applications
+#   --bin PATH     export a binary shim to host's ~/.local/bin
+#   --delete       remove previously exported app/bin
+
+set -o errexit
+set -o nounset
+
+[ -z "${USER}" ]  && USER="$(id -run)"
+[ -z "${HOME}" ]  && HOME="$(getent passwd "${USER}" | cut -d':' -f6)"
+
+version="0.1.0"
+mode=""
+export_label=""
+export_path=""
+extra_flags=""
+delete=0
+verbose=0
+
+container_id="${CONTAINER_ID:-unknown}"
+
+host_apps_dir="${HOME}/.local/share/applications"
+host_bin_dir="${HOME}/.local/bin"
+
+show_help() {
+    cat << EOF
+lxcbox-export version: ${version}
+
+Export apps or binaries from inside the container to the host.
+Run this INSIDE the container.
+
+Usage:
+    lxcbox-export --app firefox
+    lxcbox-export --bin /usr/bin/htop
+    lxcbox-export --app firefox --delete
+    lxcbox-export --bin /usr/bin/htop --delete
+
+Options:
+    --app/-a APP:   export a .desktop application
+    --bin/-b PATH:  export a binary wrapper
+    --delete/-d:    remove the export
+    --extra-flags:  additional flags passed to lxcbox-enter for bin wrappers
+    --verbose/-v:   verbose output
+    --help/-h:      this message
+EOF
+}
+
+while :; do
+    case $1 in
+        -h|--help)    show_help; exit 0 ;;
+        -v|--verbose) verbose=1; shift ;;
+        -d|--delete)  delete=1; shift ;;
+        -a|--app)
+            [ -n "$2" ] && { mode="app"; export_label="$2"; shift 2; } ;;
+        -b|--bin)
+            [ -n "$2" ] && { mode="bin"; export_path="$2"; shift 2; } ;;
+        --extra-flags)
+            [ -n "$2" ] && { extra_flags="$2"; shift 2; } ;;
+        --) shift; break ;;
+        -*) printf >&2 "ERROR: unknown flag '%s'\n" "$1"; exit 1 ;;
+        *)  break ;;
+    esac
+done
+
+[ "${verbose}" -ne 0 ] && set -o xtrace
+
+# ── Sanity checks ────────────────────────────────────────────────────────────
+if [ -z "${mode}" ]; then
+    printf >&2 "ERROR: specify --app or --bin\n"
+    show_help; exit 1
+fi
+
+if [ ! -x /usr/bin/lxcbox-host-exec ]; then
+    printf >&2 "ERROR: /usr/bin/lxcbox-host-exec not found or not executable\n"
+    exit 1
+fi
+
+# ── App export ────────────────────────────────────────────────────────────────
+export_app() {
+    # Find the .desktop file inside the container
+    desktop_file=""
+    for search_dir in \
+        /usr/share/applications \
+        /usr/local/share/applications \
+        "${HOME}/.local/share/applications"; do
+        candidate="${search_dir}/${export_label}.desktop"
+        [ -e "${candidate}" ] && { desktop_file="${candidate}"; break; }
+    done
+
+    if [ -z "${desktop_file}" ]; then
+        # Try glob search
+        desktop_file="$(find /usr/share/applications /usr/local/share/applications \
+            -name "*${export_label}*.desktop" 2>/dev/null | head -1 || true)"
+    fi
+
+    if [ -z "${desktop_file}" ]; then
+        printf >&2 "ERROR: no .desktop file found for '%s'\n" "${export_label}"
+        exit 1
+    fi
+
+    host_desktop_name="lxcbox-${container_id}-$(basename "${desktop_file}")"
+    host_desktop_path="${host_apps_dir}/${host_desktop_name}"
+
+    if [ "${delete}" -eq 1 ]; then
+        lxcbox-host-exec rm -f "${host_desktop_path}"
+        printf "Removed app export: %s\n" "${host_desktop_path}"
+        return 0
+    fi
+
+    # Rewrite Exec= and TryExec= to run via lxcbox-enter
+    lxcbox-host-exec mkdir -p "${host_apps_dir}"
+
+    # Stream the modified .desktop to the host
+    sed \
+        -e "s|^Exec=|Exec=lxcbox-enter ${container_id} -- |g" \
+        -e "s|^TryExec=.*||g" \
+        -e "s|^Name=|Name=[${container_id}] |g" \
+        "${desktop_file}" | \
+        lxcbox-host-exec sh -c "cat > '${host_desktop_path}'"
+
+    lxcbox-host-exec chmod 644 "${host_desktop_path}"
+    printf "Exported app: %s\n" "${host_desktop_path}"
+    printf "App '%s' is now available in the host app launcher.\n" "${export_label}"
+}
+
+# ── Binary export ─────────────────────────────────────────────────────────────
+export_bin() {
+    if [ ! -e "${export_path}" ]; then
+        # Try resolving via PATH
+        export_path="$(command -v "${export_path}" 2>/dev/null || true)"
+        if [ -z "${export_path}" ]; then
+            printf >&2 "ERROR: binary not found: %s\n" "${export_path}"
+            exit 1
+        fi
+    fi
+
+    bin_name="$(basename "${export_path}")"
+    host_bin_path="${host_bin_dir}/${bin_name}"
+
+    if [ "${delete}" -eq 1 ]; then
+        lxcbox-host-exec rm -f "${host_bin_path}"
+        printf "Removed binary export: %s\n" "${host_bin_path}"
+        return 0
+    fi
+
+    lxcbox-host-exec mkdir -p "${host_bin_dir}"
+
+    # Write a wrapper script on the host that calls lxcbox-enter
+    lxcbox-host-exec sh -c "cat > '${host_bin_path}'" << WRAPPER
+#!/bin/sh
+# lxcbox-export wrapper — generated by lxcbox-export
+# Container: ${container_id}  Binary: ${export_path}
+exec lxcbox-enter ${extra_flags} "${container_id}" -- "${export_path}" "\$@"
+WRAPPER
+
+    lxcbox-host-exec chmod 755 "${host_bin_path}"
+    printf "Exported binary: %s -> %s\n" "${export_path}" "${host_bin_path}"
+}
+
+# ── Dispatch ──────────────────────────────────────────────────────────────────
+case "${mode}" in
+    app) export_app ;;
+    bin) export_bin ;;
+esac

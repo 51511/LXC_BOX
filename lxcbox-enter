@@ -1,0 +1,161 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# lxcbox-enter — attach to a running lxcbox container, or start+attach
+# Replaces: distrobox-enter (podman exec → lxc-attach)
+
+[ -z "${USER}" ]  && USER="$(id -run)"
+[ -z "${HOME}" ]  && HOME="$(getent passwd "${USER}" | cut -d':' -f6)"
+[ -z "${SHELL}" ] && SHELL="$(getent passwd "${USER}" | cut -d':' -f7)"
+
+container_name=""
+container_user_uid="$(id -ru)"
+enter_cmd=""
+verbose=0
+rootful=0
+version="0.1.0"
+
+[ "${container_user_uid}" -eq 0 ] && rootful=1
+[ "${rootful}" -eq 1 ] \
+    && lxc_dir="/var/lib/lxc" \
+    || lxc_dir="${HOME}/.local/share/lxc"
+
+lxcbox_metadata_dir="${HOME}/.local/share/lxcbox"
+distrobox_sudo_program=${DBX_SUDO_PROGRAM:-"sudo"}
+
+show_help() {
+    cat << EOF
+lxcbox-enter version: ${version}
+
+Usage:
+    lxcbox-enter <name>
+    lxcbox-enter <name> -- bash
+    lxcbox-enter <name> -- sh -c "echo hello"
+    lxcbox-enter --name mybox --root
+
+Options:
+    --name/-n:    container name
+    --root/-r:    use rootful LXC (/var/lib/lxc)
+    --verbose/-v: show more output
+    --help/-h:    this message
+    -- CMD:       command to run instead of shell
+EOF
+}
+
+while :; do
+    case $1 in
+        -h|--help)    show_help; exit 0 ;;
+        -v|--verbose) verbose=1; shift ;;
+        -r|--root)    rootful=1; lxc_dir="/var/lib/lxc"; shift ;;
+        -n|--name)
+            [ -n "$2" ] && { container_name="$2"; shift 2; } ;;
+        --)
+            shift
+            enter_cmd="$*"
+            break ;;
+        -*)
+            printf >&2 "ERROR: unknown flag '%s'\n" "$1"
+            show_help; exit 1 ;;
+        *)
+            if [ -n "$1" ] && [ -z "${container_name}" ]; then
+                container_name="$1"; shift
+            else
+                break
+            fi ;;
+    esac
+done
+
+set -o errexit
+set -o nounset
+[ "${verbose}" -ne 0 ] && set -o xtrace
+
+# ── Validate ──────────────────────────────────────────────────────────────────
+if [ -z "${container_name}" ]; then
+    printf >&2 "ERROR: no container name specified.\n"
+    show_help; exit 1
+fi
+
+if [ ! -d "${lxc_dir}/${container_name}" ]; then
+    printf >&2 "ERROR: lxcbox '%s' not found in %s\n" "${container_name}" "${lxc_dir}"
+    printf >&2 "Create it first:\n  lxcbox-create --name %s\n" "${container_name}"
+    exit 1
+fi
+
+# ── lxc-attach wrapper ────────────────────────────────────────────────────────
+# If rootful, prefix with sudo. If rootless, LXC userns maps UID in config.
+lxc_cmd="lxc-attach"
+[ "${rootful}" -eq 1 ] && lxc_cmd="${distrobox_sudo_program} lxc-attach"
+
+# ── Ensure container is running ───────────────────────────────────────────────
+container_status() {
+    lxc-info -n "${container_name}" ${rootful:+-P "${lxc_dir}"} 2>/dev/null \
+        | grep "^State:" | awk '{print $2}'
+}
+
+state="$(container_status || true)"
+
+if [ "${state}" != "RUNNING" ]; then
+    printf >&2 "Starting lxcbox '%s' ...\n" "${container_name}"
+
+    start_cmd="lxc-start"
+    [ "${rootful}" -eq 1 ] && start_cmd="${distrobox_sudo_program} lxc-start"
+
+    # -d = daemonize (background), lxcbox-init handles user setup
+    ${start_cmd} -n "${container_name}" -d
+
+    # Wait up to 10s for container to be RUNNING
+    i=0
+    while [ "${state}" != "RUNNING" ] && [ "${i}" -lt 20 ]; do
+        sleep 0.5
+        state="$(container_status || true)"
+        i=$((i + 1))
+    done
+
+    if [ "${state}" != "RUNNING" ]; then
+        printf >&2 "ERROR: container '%s' failed to start (state: %s)\n" \
+            "${container_name}" "${state}"
+        exit 1
+    fi
+fi
+
+# ── Build environment to forward ─────────────────────────────────────────────
+# Forward the minimal set that makes a desktop session work.
+wayland_display="${WAYLAND_DISPLAY:-wayland-0}"
+xdg_runtime="/run/user/${container_user_uid}"
+
+env_flags=""
+env_flags="${env_flags} --set-var WAYLAND_DISPLAY=${wayland_display}"
+env_flags="${env_flags} --set-var XDG_RUNTIME_DIR=${xdg_runtime}"
+env_flags="${env_flags} --set-var DBUS_SESSION_BUS_ADDRESS=unix:path=${xdg_runtime}/bus"
+env_flags="${env_flags} --set-var TERM=${TERM:-xterm-256color}"
+env_flags="${env_flags} --set-var COLORTERM=${COLORTERM:-truecolor}"
+env_flags="${env_flags} --set-var HOME=${HOME}"
+env_flags="${env_flags} --set-var USER=${USER}"
+env_flags="${env_flags} --set-var SHELL=${SHELL}"
+env_flags="${env_flags} --set-var CONTAINER_ID=${container_name}"
+
+# Forward DISPLAY if set (X11 fallback)
+[ -n "${DISPLAY:-}" ] && env_flags="${env_flags} --set-var DISPLAY=${DISPLAY}"
+
+# ── Attach ────────────────────────────────────────────────────────────────────
+# lxc-attach --uid/--gid drops into the container as the correct user.
+# We keep-env cleared and forward only what we need.
+
+if [ -z "${enter_cmd}" ]; then
+    # Interactive shell — allocate a pty
+    # shellcheck disable=SC2086
+    exec ${lxc_cmd} \
+        -n "${container_name}" \
+        --uid "${container_user_uid}" \
+        --gid "$(id -rg)" \
+        ${env_flags} \
+        -- "${SHELL}" -l
+else
+    # Non-interactive command
+    # shellcheck disable=SC2086
+    exec ${lxc_cmd} \
+        -n "${container_name}" \
+        --uid "${container_user_uid}" \
+        --gid "$(id -rg)" \
+        ${env_flags} \
+        -- ${enter_cmd}
+fi

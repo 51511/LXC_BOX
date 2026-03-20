@@ -1,0 +1,32 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# install — install lxcbox scripts to PREFIX (default /usr/local)
+
+PREFIX="${PREFIX:-/usr/local}"
+SCRIPTS="
+    lxcbox
+    lxcbox-create
+    lxcbox-enter
+    lxcbox-init
+    lxcbox-export
+    lxcbox-host-exec
+    lxcbox-snapshot
+    lxcbox-list
+    lxcbox-rm
+"
+
+SCRIPT_DIR="$(cd "$(dirname "${0}")" && pwd)"
+
+for script in ${SCRIPTS}; do
+    src="${SCRIPT_DIR}/${script}"
+    dst="${PREFIX}/bin/${script}"
+    if [ -e "${src}" ]; then
+        install -Dm755 "${src}" "${dst}"
+        printf "Installed: %s\n" "${dst}"
+    else
+        printf "SKIP (not found): %s\n" "${src}"
+    fi
+done
+
+printf "\nlxcbox installed to %s/bin/\n" "${PREFIX}"
+printf "Run 'lxcbox --help' to get started.\n"
