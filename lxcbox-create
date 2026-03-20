@@ -149,14 +149,6 @@ effective_home="${container_user_custom_home:-"${container_user_home}"}"
 container_rootfs="${lxc_dir}/${container_name}/rootfs"
 container_config="${lxc_dir}/${container_name}/config"
 
-# ── Dependency check ─────────────────────────────────────────────────────────
-for dep in lxc-create lxc-start lxc-info debootstrap; do
-    if ! command -v "${dep}" > /dev/null 2>&1; then
-        printf >&2 "ERROR: missing dependency: %s\n" "${dep}"
-        exit 127
-    fi
-done
-
 # ── Check container already exists ───────────────────────────────────────────
 if [ -d "${lxc_dir}/${container_name}" ]; then
     printf "lxcbox '%s' already exists.\n" "${container_name}"
@@ -351,6 +343,14 @@ if [ "${dryrun}" -ne 0 ]; then
         "${container_image_release}" "${container_rootfs}"
     exit 0
 fi
+
+# ── Dependency check ─────────────────────────────────────────────────────────
+for dep in lxc-start lxc-info debootstrap; do
+    if ! command -v "${dep}" > /dev/null 2>&1; then
+        printf >&2 "ERROR: missing dependency: %s\n" "${dep}"
+        exit 127
+    fi
+done
 
 # ── Confirm ───────────────────────────────────────────────────────────────────
 if [ "${non_interactive}" -eq 0 ]; then
