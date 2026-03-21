@@ -3,10 +3,9 @@
 # lxcbox-host-exec — run a command on the HOST from inside the container
 # Replaces: distrobox-host-exec
 #
-# Strategy (same as distrobox):
-#   The host root is bind-mounted at /run/host.
-#   We use nsenter to escape the container's mount namespace and
-#   execute the command in the host's PID/mount/net namespace.
+# Strategy:
+#   /proc/1/ns 是 Host 的 PID 1 namespace（因為共用 PID namespace）
+#   用 nsenter 逃出 container 的 mount namespace 執行 Host 指令
 #
 # Usage (inside container):
 #   lxcbox-host-exec ls /
@@ -44,18 +43,17 @@ if [ "$#" -eq 0 ]; then
     show_help; exit 1
 fi
 
-# /run/host/proc/1 is PID 1 on the host — nsenter into its namespaces.
-HOST_PID1_NS="/run/host/proc/1/ns"
+# /proc/1/ns — PID 1 的 namespace（共用 PID namespace 下等於 Host PID 1）
+HOST_PID1_NS="/proc/1/ns"
 
 if [ ! -d "${HOST_PID1_NS}" ]; then
-    printf >&2 "ERROR: host proc not found at /run/host/proc\n"
-    printf >&2 "Is /run/host mounted? Check lxcbox-create config.\n"
+    printf >&2 "ERROR: /proc/1/ns not found\n"
+    printf >&2 "Is proc mounted? Check lxcbox-create config.\n"
     exit 1
 fi
 
-# nsenter into host mount + pid + net namespaces, then exec command.
-# --wd keeps working directory. PATH is extended to include host paths.
-exec nsenter \
+# nsenter 需要 root 權限，用 sudo
+exec sudo nsenter \
     --mount="${HOST_PID1_NS}/mnt" \
     --pid="${HOST_PID1_NS}/pid" \
     --net="${HOST_PID1_NS}/net" \

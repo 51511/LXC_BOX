@@ -3,9 +3,6 @@
 #
 # lxcbox-create — distrobox-create rewritten for LXC backend
 # Part of the lxcbox project (Void Linux Host + LXC + Debian container)
-#
-# Replaces: podman/docker/lilipod
-# Requires: lxc, debootstrap (on host)
 
 # ── Env setup ────────────────────────────────────────────────────────────────
 [ -z "${USER}" ]  && USER="$(id -run)"
@@ -13,7 +10,6 @@
 [ -z "${SHELL}" ] && SHELL="$(getent passwd "${USER}" | cut -d':' -f7)"
 
 # ── When running as root, find the real target user ───────────────────────────
-# Priority: LXCBOX_USER > SUDO_USER > DOAS_USER > logname > current USER
 if [ "$(id -ru)" -eq 0 ]; then
     _target_user="${LXCBOX_USER:-${SUDO_USER:-${DOAS_USER:-}}}"
     if [ -z "${_target_user}" ]; then
@@ -47,7 +43,6 @@ container_pre_init_hook=""
 container_additional_volumes=""
 container_manager_additional_flags=""
 
-# LXC state dir — rootful uses /var/lib/lxc, rootless uses ~/.local/share/lxc
 [ "$(id -ru)" -eq 0 ] && rootful=1 || rootful=0
 [ "${rootful}" -eq 1 ] \
     && lxc_dir="/var/lib/lxc" \
@@ -60,16 +55,14 @@ non_interactive=0
 verbose=0
 version="0.1.0"
 
-# Paths to lxcbox helper scripts (same dir as this script, or PATH)
 script_dir="$(cd "$(dirname "${0}")" && pwd)"
 lxcbox_init_path="${script_dir}/lxcbox-init"
 lxcbox_export_path="${script_dir}/lxcbox-export"
 lxcbox_hostexec_path="${script_dir}/lxcbox-host-exec"
-[ ! -e "${lxcbox_init_path}" ]     && lxcbox_init_path="$(command -v lxcbox-init 2>/dev/null || true)"
-[ ! -e "${lxcbox_export_path}" ]   && lxcbox_export_path="$(command -v lxcbox-export 2>/dev/null || true)"
+[ ! -e "${lxcbox_init_path}" ]    && lxcbox_init_path="$(command -v lxcbox-init 2>/dev/null || true)"
+[ ! -e "${lxcbox_export_path}" ]  && lxcbox_export_path="$(command -v lxcbox-export 2>/dev/null || true)"
 [ ! -e "${lxcbox_hostexec_path}" ] && lxcbox_hostexec_path="$(command -v lxcbox-host-exec 2>/dev/null || true)"
 
-# ── Config file loading ───────────────────────────────────────────────────────
 config_files="
     /usr/share/lxcbox/lxcbox.conf
     /etc/lxcbox/lxcbox.conf
@@ -77,13 +70,12 @@ config_files="
     ${HOME}/.lxcboxrc
 "
 for config_file in ${config_files}; do
-    # shellcheck disable=SC1090
     [ -e "${config_file}" ] && . "$(realpath "${config_file}")"
 done
 
 distrobox_sudo_program=${DBX_SUDO_PROGRAM:-${distrobox_sudo_program:-"sudo"}}
 
-# ── show_help ─────────────────────────────────────────────────────────────────
+# ── show_help ────────────────────────────────────────────────────────────────
 show_help()
 {
     cat << EOF
@@ -95,7 +87,6 @@ Usage:
     lxcbox-create --name mybox --home ~/boxes/mybox
     lxcbox-create --name mybox --volume /mnt/data:/mnt/data
     lxcbox-create --name mybox --additional-packages "git vim tmux"
-    lxcbox-create --name mybox --init-hooks "echo done"
 
 Options:
     --name/-n:              name for the container          default: ${container_name_default}
@@ -106,8 +97,7 @@ Options:
     --additional-packages:  packages to install on first init
     --init-hooks:           commands to run at end of init
     --pre-init-hooks:       commands to run at start of init
-    --additional-flags/-a:  extra lxc-start flags (advanced)
-    --user/-u:              target user for home/uid/gid (useful when running as root)
+    --user/-u:              target user for home/uid/gid
     --root/-r:              use root LXC (/var/lib/lxc)
     --dry-run/-d:           print generated config, do not create
     --yes/-Y:               non-interactive
@@ -177,6 +167,7 @@ set -o nounset
 [ -z "${container_hostname}" ] && container_hostname="${container_name}"
 
 effective_home="${container_user_custom_home:-"${container_user_home}"}"
+
 container_rootfs="${lxc_dir}/${container_name}/rootfs"
 container_config="${lxc_dir}/${container_name}/config"
 
@@ -188,22 +179,21 @@ if [ -d "${lxc_dir}/${container_name}" ]; then
 fi
 
 # ── generate_lxc_config ───────────────────────────────────────────────────────
-# 修正版：整合所有踩過的坑
-#
-# 修正項目：
-#   1. lxc.include = 覆蓋 /etc/lxc/default.conf（Void/Debian 預設有 veth 衝突）
-#   2. 拿掉 namespace.share.pid / ipc（會造成 hang）
-#   3. 拿掉 /tmp /sys /dev bind mount，改用 lxc.mount.auto
-#   4. lxc.tty.max + lxc.pty.max（讓 xterm/tmux 等 pty 正常運作）
-#   5. XDG_RUNTIME_DIR mount 整個目錄（不只是單一 socket 檔案）
-#   6. X11 socket mount（XFCE / X11 桌面支援）
-#   7. Wayland socket 以整個 XDG_RUNTIME_DIR 帶入（不單獨 mount socket）
-#   8. DISPLAY + XAUTHORITY 環境變數
+# 修正版本，整合所有踩過的坑：
+# 1. lxc.include = 覆蓋 /etc/lxc/default.conf（Void Linux 預設有 veth 衝突）
+# 2. 拿掉 /tmp /sys /dev bind mount，改用 lxc.mount.auto
+# 3. lxc.tty.max + lxc.pty.max 讓 devpts/xterm 正常運作
+# 4. namespace.share.pid 拿掉（會造成 hang）
+# 5. XDG_RUNTIME_DIR mount 整個目錄（不只單一 socket）
+# 6. X11 socket mount
+# 7. Wayland/PipeWire socket 用 optional（沒 GUI session 不炸）
 # ─────────────────────────────────────────────────────────────────────────────
 generate_lxc_config()
 {
     wayland_display="${WAYLAND_DISPLAY:-wayland-0}"
     xdg_runtime="/run/user/${container_user_uid}"
+    wayland_socket="${xdg_runtime}/${wayland_display}"
+    pipewire_socket="${xdg_runtime}/pipewire-0"
     x11_socket="/tmp/.X11-unix"
 
     cat << LXCCONF
@@ -211,35 +201,32 @@ generate_lxc_config()
 # Container: ${container_name}
 
 # ── 覆蓋 /etc/lxc/default.conf ────────────────────────────────────────────────
-# 清掉發行版預設設定（如 Void 的 veth 網路），避免跟 lxc.net.0.type = none 衝突
+# 清掉發行版預設的 veth 網路設定，避免跟 lxc.net.0.type = none 衝突
 lxc.include =
 
 # ── Identity ──────────────────────────────────────────────────────────────────
 lxc.uts.name = ${container_hostname}
 
 # ── Init ──────────────────────────────────────────────────────────────────────
-# sleep infinity 讓 container 持續在背景跑
-# lxcbox-init 在第一次 lxc-attach 時由 lxcbox-enter 觸發
 lxc.init.cmd = /bin/sleep infinity
 
 # ── Capabilities / security ───────────────────────────────────────────────────
-# 保留所有 capabilities（等同 distrobox --privileged）
 lxc.cap.drop =
 
 # ── Network ───────────────────────────────────────────────────────────────────
-# 共用 Host 網路 namespace（不建虛擬網卡，直接用 Host 網路）
+# 共用 Host 網路 namespace（不建虛擬網卡）
 lxc.net.0.type = none
 
 # ── TTY / PTY ─────────────────────────────────────────────────────────────────
-# 讓 container 有足夠的 pty（xterm、tmux、ssh 等需要）
+# 讓 container 有足夠的 pty（xterm、tmux 等需要）
 lxc.tty.max = 4
 lxc.pty.max = 1024
 
 # ── Filesystem ────────────────────────────────────────────────────────────────
 lxc.rootfs.path = dir:${container_rootfs}
 
-# ── 自動掛載 proc / sys / cgroup ──────────────────────────────────────────────
-# 注意：不要手動 bind mount /sys /dev /tmp，讓 LXC 自己管理，否則會衝突
+# ── 自動掛載（proc / sys / cgroup）────────────────────────────────────────────
+# 注意：不手動 bind mount /sys /dev /tmp，讓 LXC 自己管理
 lxc.mount.auto = proc:mixed sys:mixed cgroup:mixed
 
 # ── 網路設定檔（跟 Host 同步）────────────────────────────────────────────────
@@ -247,27 +234,27 @@ lxc.mount.entry = /etc/hosts etc/hosts none bind,ro,create=file 0 0
 lxc.mount.entry = /etc/resolv.conf etc/resolv.conf none bind,ro,create=file 0 0
 lxc.mount.entry = /etc/hostname etc/hostname none bind,ro,create=file 0 0
 
-# ── Host root（distrobox 風格，掛在 /run/host）───────────────────────────────
+# ── Host root（distrobox 風格，/run/host）────────────────────────────────────
 lxc.mount.entry = / run/host none bind,ro,rslave,create=dir 0 0
 
 # ── User home ─────────────────────────────────────────────────────────────────
 lxc.mount.entry = ${effective_home} ${effective_home#/} none bind,rw,rslave,create=dir 0 0
 
-# ── XDG_RUNTIME_DIR（整個目錄，包含 Wayland / PipeWire / D-Bus socket）────────
+# ── XDG_RUNTIME_DIR（整個目錄，包含所有 socket）──────────────────────────────
 $([ -d "${xdg_runtime}" ] \
     && printf "lxc.mount.entry = %s %s none bind,rw,rslave,create=dir 0 0" \
         "${xdg_runtime}" "${xdg_runtime#/}" \
-    || printf "# XDG_RUNTIME_DIR %s not present — will be missing in container" "${xdg_runtime}")
+    || printf "# XDG_RUNTIME_DIR %s not present (no GUI session)" "${xdg_runtime}")
 
-# ── X11 socket（X11 / XFCE 桌面支援）────────────────────────────────────────
+# ── X11 socket ────────────────────────────────────────────────────────────────
 $([ -d "${x11_socket}" ] \
     && printf "lxc.mount.entry = %s %s none bind,rw,rslave,create=dir 0 0" \
         "${x11_socket}" "${x11_socket#/}" \
-    || printf "# X11 socket not found at %s — X11 GUI will not work" "${x11_socket}")
+    || printf "# X11 socket not found at %s" "${x11_socket}")
 
 # ── lxcbox helper scripts ─────────────────────────────────────────────────────
-$([ -n "${lxcbox_init_path}" ]     && printf "lxc.mount.entry = %s usr/bin/lxcbox-init none bind,ro,create=file 0 0" "${lxcbox_init_path}")
-$([ -n "${lxcbox_export_path}" ]   && printf "lxc.mount.entry = %s usr/bin/lxcbox-export none bind,ro,create=file 0 0" "${lxcbox_export_path}")
+$([ -n "${lxcbox_init_path}" ]    && printf "lxc.mount.entry = %s usr/bin/lxcbox-init none bind,ro,create=file 0 0" "${lxcbox_init_path}")
+$([ -n "${lxcbox_export_path}" ]  && printf "lxc.mount.entry = %s usr/bin/lxcbox-export none bind,ro,create=file 0 0" "${lxcbox_export_path}")
 $([ -n "${lxcbox_hostexec_path}" ] && printf "lxc.mount.entry = %s usr/bin/lxcbox-host-exec none bind,ro,create=file 0 0" "${lxcbox_hostexec_path}")
 
 # ── Additional volumes ────────────────────────────────────────────────────────
@@ -292,10 +279,6 @@ lxc.environment = DBUS_SESSION_BUS_ADDRESS=unix:path=${xdg_runtime}/bus
 lxc.environment = DISPLAY=${DISPLAY:-:0}
 lxc.environment = XAUTHORITY=${effective_home}/.Xauthority
 
-# ── Labels (stored as lxcbox metadata) ───────────────────────────────────────
-# LXC has no native label system; lxcbox stores metadata separately.
-# See: ${lxcbox_metadata_dir}/${container_name}
-
 LXCCONF
 }
 
@@ -314,7 +297,6 @@ bootstrap_rootfs()
             "${container_rootfs}" \
             "http://deb.debian.org/debian"
     else
-        # Rootless: 需要 fakeroot + fakechroot
         if ! command -v fakeroot > /dev/null 2>&1 || ! command -v fakechroot > /dev/null 2>&1; then
             printf >&2 "ERROR: rootless bootstrap requires fakeroot and fakechroot\n"
             printf >&2 "Install with: sudo xbps-install -S fakeroot fakechroot\n"
@@ -322,7 +304,6 @@ bootstrap_rootfs()
         fi
         fakechroot fakeroot debootstrap \
             --variant=minbase \
-            --include=ca-certificates,locales,coreutils \
             "${container_image_release}" \
             "${container_rootfs}" \
             "http://deb.debian.org/debian"
@@ -349,13 +330,10 @@ META
 if [ "${dryrun}" -ne 0 ]; then
     printf "# ── LXC config that would be written to %s ──\n" "${container_config}"
     generate_lxc_config
-    printf "\n# ── debootstrap command that would run ──\n"
-    printf "debootstrap --variant=minbase --include=ca-certificates,locales,coreutils %s %s http://deb.debian.org/debian\n" \
-        "${container_image_release}" "${container_rootfs}"
     exit 0
 fi
 
-# ── Dependency check ──────────────────────────────────────────────────────────
+# ── Dependency check ─────────────────────────────────────────────────────────
 for dep in lxc-start lxc-info debootstrap; do
     if ! command -v "${dep}" > /dev/null 2>&1; then
         printf >&2 "ERROR: missing dependency: %s\n" "${dep}"
@@ -381,7 +359,9 @@ printf >&2 "Creating lxcbox '%s' ...\t" "${container_name}"
 
 mkdir -p "${lxc_dir}/${container_name}"
 generate_lxc_config > "${container_config}"
+
 bootstrap_rootfs
+
 write_metadata
 
 printf >&2 "\033[32m[ OK ]\033[0m\n"

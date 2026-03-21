@@ -87,7 +87,7 @@ fi
 
 # ── Start container if not running ───────────────────────────────────────────
 container_status() {
-    lxc-info -n "${container_name}" -P "${lxc_dir}" 2>/dev/null \
+    ${sudo_cmd} lxc-info -n "${container_name}" -P "${lxc_dir}" 2>/dev/null \
         | grep "^State:" | awk '{print $2}' || echo "STOPPED"
 }
 
@@ -111,7 +111,7 @@ if [ "${state}" != "RUNNING" ]; then
         exit 1
     fi
 
-    # Run lxcbox-init on first start (idempotent — checks /.lxcbox-setup-done)
+    # Run lxcbox-init on first start (idempotent)
     # shellcheck disable=SC2086
     ${sudo_cmd} lxc-attach -n "${container_name}" -P "${lxc_dir}" -- \
         /usr/bin/lxcbox-init \
@@ -136,6 +136,8 @@ env_flags="${env_flags} --set-var XDG_RUNTIME_DIR=${xdg_runtime}"
 env_flags="${env_flags} --set-var WAYLAND_DISPLAY=${wayland_display}"
 env_flags="${env_flags} --set-var DBUS_SESSION_BUS_ADDRESS=unix:path=${xdg_runtime}/bus"
 env_flags="${env_flags} --set-var TERMINFO_DIRS=/usr/share/terminfo:/run/host/usr/share/terminfo"
+env_flags="${env_flags} --set-var DISPLAY=${DISPLAY:-:0}"
+env_flags="${env_flags} --set-var XAUTHORITY=${HOME}/.Xauthority"
 [ -n "${DISPLAY:-}" ] && env_flags="${env_flags} --set-var DISPLAY=${DISPLAY}"
 
 # ── Attach ────────────────────────────────────────────────────────────────────
