@@ -168,7 +168,7 @@ lxcbox:           實驗性，可能炸，但架構乾淨
 
 ## 靈感來源
 
-- **Distrobox** — 我們的精神父親，只是我們覺得 Podman 太重了
+- **Distrobox** — 我們的精神來源，只是我們覺得 Podman 太重了
 - **IncusOS** — 驗證了「極簡 Host + container 跑一切」這個概念可行
 - **一個很長的 Claude 對話** — 從 Unix 歷史聊到 AT&T 訴訟再到寫出這個東西
 
