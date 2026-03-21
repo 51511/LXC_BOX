@@ -184,7 +184,7 @@ lxcbox:           實驗性，可能炸，但架構乾淨
 
 ## 授權
 
-GNU AGPL v3 
+GNU GPL v3 
 
 
 ---
