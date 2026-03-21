@@ -184,7 +184,7 @@ lxcbox:           實驗性，可能炸，但架構乾淨
 
 ## 授權
 
-GPL-3.0-only
+GNU AGPL v3 
 
 （跟 Distrobox 一樣，因為我們是從它得到靈感的，也因為 GPL 很有氣勢）
 
