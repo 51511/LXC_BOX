@@ -184,21 +184,13 @@ generate_lxc_config()
 lxc.uts.name = ${container_hostname}
 
 # ── Init ──────────────────────────────────────────────────────────────────────
-# lxcbox-init is bind-mounted in at /usr/bin/lxcbox-init
-# It runs as root, sets up the user, then drops to user shell.
-lxc.init.cmd = /usr/bin/lxcbox-init \\
-    --name "${container_user_name}" \\
-    --user ${container_user_uid} \\
-    --group ${container_user_gid} \\
-    --home "${effective_home}" \\
-    --additional-packages "${container_additional_packages}" \\
-    --pre-init-hooks "${container_pre_init_hook}" \\
-    -- '${container_init_hook}'
+# sleep infinity keeps the container alive.
+# lxcbox-init runs on first lxc-attach via lxcbox-enter.
+lxc.init.cmd = /bin/sleep infinity
 
 # ── Capabilities / security ───────────────────────────────────────────────────
 # Keep all caps (privileged-equivalent) — same as distrobox --privileged
 lxc.cap.drop =
-lxc.apparmor.profile = unconfined
 
 # ── Namespace sharing (distrobox defaults) ────────────────────────────────────
 # Share host network namespace (no virtual NIC, full host network)
@@ -240,8 +232,9 @@ lxc.mount.entry = /etc/hostname etc/hostname none bind,ro,create=file 0 0
 # User home (rw, rslave so submounts propagate)
 lxc.mount.entry = ${effective_home} ${effective_home#/} none bind,rw,rslave,create=dir 0 0
 
-# XDG_RUNTIME_DIR (needed by most GUI apps)
-lxc.mount.entry = ${xdg_runtime} ${xdg_runtime#/} none bind,rw,rslave,create=dir 0 0
+# XDG_RUNTIME_DIR — only mount if it exists on host (GUI session)
+$([ -d "${xdg_runtime}" ] && printf "lxc.mount.entry = %s %s none bind,rw,rslave,create=dir 0 0" \
+    "${xdg_runtime}" "${xdg_runtime#/}" || printf "# XDG_RUNTIME_DIR %s not present (no GUI session)" "${xdg_runtime}")
 
 # ── Wayland socket ────────────────────────────────────────────────────────────
 $([ -S "${wayland_socket}" ] && printf "lxc.mount.entry = %s %s none bind,rw,create=file 0 0" \
@@ -299,7 +292,7 @@ bootstrap_rootfs()
     if [ "${rootful}" -eq 1 ]; then
         debootstrap \
             --variant=minbase \
-            --include=systemd-container,ca-certificates,locales \
+            --include=ca-certificates,locales \
             "${container_image_release}" \
             "${container_rootfs}" \
             "http://deb.debian.org/debian"
