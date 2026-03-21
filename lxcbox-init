@@ -10,7 +10,7 @@
 #   4. Drop to user shell (or just exit 0 so lxc-start daemonizes cleanly)
 
 set -o errexit
-set -o nounset
+# set -o nounset  # disabled: args may be empty
 
 INIT_DONE_MARKER="/run/.lxcbox-init-done"
 SETUP_DONE_MARKER="/.lxcbox-setup-done"
