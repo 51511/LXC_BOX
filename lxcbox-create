@@ -12,6 +12,24 @@
 [ -z "${HOME}" ]  && HOME="$(getent passwd "${USER}" | cut -d':' -f6)"
 [ -z "${SHELL}" ] && SHELL="$(getent passwd "${USER}" | cut -d':' -f7)"
 
+# ── When running as root, find the real target user ───────────────────────────
+# Priority: LXCBOX_USER > SUDO_USER > DOAS_USER > logname > current USER
+if [ "$(id -ru)" -eq 0 ]; then
+    _target_user="${LXCBOX_USER:-${SUDO_USER:-${DOAS_USER:-}}}"
+    if [ -z "${_target_user}" ]; then
+        _target_user="$(logname 2>/dev/null || true)"
+    fi
+    if [ -z "${_target_user}" ] || [ "${_target_user}" = "root" ]; then
+        _target_user="${USER}"
+    fi
+    _target_entry="$(getent passwd "${_target_user}" 2>/dev/null || true)"
+    if [ -n "${_target_entry}" ]; then
+        USER="${_target_user}"
+        HOME="$(echo "${_target_entry}" | cut -d: -f6)"
+        SHELL="$(echo "${_target_entry}" | cut -d: -f7)"
+    fi
+fi
+
 # ── Defaults ──────────────────────────────────────────────────────────────────
 container_name=""
 container_name_default="my-lxcbox"
@@ -19,8 +37,8 @@ container_image="debian"
 container_image_release="bookworm"
 container_hostname=""
 container_user_name="${USER}"
-container_user_uid="$(id -ru)"
-container_user_gid="$(id -rg)"
+container_user_uid="$(id -u "${USER}" 2>/dev/null || id -ru)"
+container_user_gid="$(id -g "${USER}" 2>/dev/null || id -rg)"
 container_user_home="${HOME:-"/"}"
 container_user_custom_home=""
 container_home_prefix=""
