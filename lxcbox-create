@@ -108,6 +108,7 @@ Options:
     --init-hooks:           commands to run at end of init
     --pre-init-hooks:       commands to run at start of init
     --additional-flags/-a:  extra lxc-start flags (advanced)
+    --user/-u:              target user for home/uid/gid (useful when running as root)
     --root/-r:              use root LXC (/var/lib/lxc)
     --dry-run/-d:           print generated config, do not create
     --yes/-Y:               non-interactive
@@ -128,6 +129,22 @@ while :; do
         -Y | --yes)        non_interactive=1; shift ;;
         -n | --name)
             [ -n "$2" ] && { container_name="$2"; shift 2; } ;;
+        -u | --user)
+            if [ -n "$2" ]; then
+                _target_entry="$(getent passwd "$2" 2>/dev/null || true)"
+                if [ -n "${_target_entry}" ]; then
+                    USER="$2"
+                    HOME="$(echo "${_target_entry}" | cut -d: -f6)"
+                    SHELL="$(echo "${_target_entry}" | cut -d: -f7)"
+                    container_user_name="${USER}"
+                    container_user_uid="$(id -u "${USER}")"
+                    container_user_gid="$(id -g "${USER}")"
+                    container_user_home="${HOME}"
+                else
+                    printf >&2 "ERROR: user '%s' not found\n" "$2"; exit 1
+                fi
+                shift 2
+            fi ;;
         -R | --release)
             [ -n "$2" ] && { container_image_release="$2"; shift 2; } ;;
         --hostname)
