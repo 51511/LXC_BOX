@@ -1,0 +1,63 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# lxcbox-host-exec — run a command on the HOST from inside the container
+# Replaces: distrobox-host-exec
+#
+# Strategy:
+#   /proc/1/ns 是 Host 的 PID 1 namespace（因為共用 PID namespace）
+#   用 nsenter 逃出 container 的 mount namespace 執行 Host 指令
+#
+# Usage (inside container):
+#   lxcbox-host-exec ls /
+#   lxcbox-host-exec lxcbox-snapshot --auto mybox
+
+set -o errexit
+set -o nounset
+
+version="0.1.0"
+
+show_help() {
+    cat << EOF
+lxcbox-host-exec version: ${version}
+
+Run a command on the HOST from inside the container.
+
+Usage:
+    lxcbox-host-exec COMMAND [ARGS...]
+
+Examples:
+    lxcbox-host-exec ls /
+    lxcbox-host-exec lxcbox-snapshot --auto \${CONTAINER_ID}
+
+The host filesystem is accessible at /run/host.
+EOF
+}
+
+case "${1:-}" in
+    -h|--help) show_help; exit 0 ;;
+    -V|--version) printf "lxcbox-host-exec: %s\n" "${version}"; exit 0 ;;
+esac
+
+if [ "$#" -eq 0 ]; then
+    printf >&2 "ERROR: no command specified\n"
+    show_help; exit 1
+fi
+
+# /proc/1/ns — PID 1 的 namespace（共用 PID namespace 下等於 Host PID 1）
+HOST_PID1_NS="/proc/1/ns"
+
+if [ ! -d "${HOST_PID1_NS}" ]; then
+    printf >&2 "ERROR: /proc/1/ns not found\n"
+    printf >&2 "Is proc mounted? Check lxcbox-create config.\n"
+    exit 1
+fi
+
+# nsenter 需要 root 權限，用 sudo
+exec sudo nsenter \
+    --mount="${HOST_PID1_NS}/mnt" \
+    --pid="${HOST_PID1_NS}/pid" \
+    --net="${HOST_PID1_NS}/net" \
+    --wd="$(pwd)" \
+    -- env \
+        PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH}" \
+    "$@"

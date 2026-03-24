@@ -1,0 +1,75 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# lxcbox — main entry point, dispatches to subcommands
+# Replaces: distrobox
+
+version="0.1.0"
+
+script_dir="$(cd "$(dirname "${0}")" && pwd)"
+
+show_help() {
+    cat << EOF
+lxcbox version: ${version}
+
+LXC-backed container manager for desktop Linux.
+Alpine host + Debian container, Distrobox-style integration.
+
+Usage:
+    lxcbox <command> [options]
+
+Commands:
+    create     Create a new lxcbox container
+    enter      Enter (attach to) a container
+    list       List containers
+    rm         Remove a container
+    export     Export an app or binary to the host (run inside container)
+    snapshot   Manage snapshots
+    host-exec  Run a command on the host (run inside container)
+
+Run 'lxcbox <command> --help' for command-specific options.
+
+Examples:
+    lxcbox create --name mybox
+    lxcbox enter mybox
+    lxcbox list
+    lxcbox snapshot create mybox before-upgrade
+    lxcbox snapshot restore mybox before-upgrade
+    lxcbox rm mybox
+EOF
+}
+
+if [ "$#" -eq 0 ]; then
+    show_help; exit 0
+fi
+
+command_name="$1"
+shift
+
+# Resolve subcommand binary: prefer same directory as this script, then PATH
+resolve_cmd() {
+    cmd_name="lxcbox-${1}"
+    if [ -x "${script_dir}/${cmd_name}" ]; then
+        printf "%s" "${script_dir}/${cmd_name}"
+    elif command -v "${cmd_name}" > /dev/null 2>&1; then
+        printf "%s" "$(command -v "${cmd_name}")"
+    else
+        printf ""
+    fi
+}
+
+case "${command_name}" in
+    -h|--help|help)   show_help; exit 0 ;;
+    -V|--version)     printf "lxcbox: %s\n" "${version}"; exit 0 ;;
+    create|enter|list|rm|export|snapshot|host-exec)
+        cmd="$(resolve_cmd "${command_name}")"
+        if [ -z "${cmd}" ]; then
+            printf >&2 "ERROR: lxcbox-%s not found in %s or PATH\n" \
+                "${command_name}" "${script_dir}"
+            exit 127
+        fi
+        exec "${cmd}" "$@"
+        ;;
+    *)
+        printf >&2 "ERROR: unknown command '%s'\n" "${command_name}"
+        show_help; exit 1 ;;
+esac

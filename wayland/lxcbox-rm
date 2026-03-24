@@ -1,0 +1,109 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# lxcbox-rm — remove an lxcbox container
+# Replaces: distrobox-rm
+
+[ -z "${USER}" ]  && USER="$(id -run)"
+[ -z "${HOME}" ]  && HOME="$(getent passwd "${USER}" | cut -d':' -f6)"
+
+container_name=""
+force=0
+verbose=0
+rootful=0
+version="0.1.0"
+
+[ "$(id -ru)" -eq 0 ] && rootful=1
+[ "${rootful}" -eq 1 ] \
+    && lxc_dir="/var/lib/lxc" \
+    || lxc_dir="${HOME}/.local/share/lxc"
+
+lxcbox_metadata_dir="${HOME}/.local/share/lxcbox"
+distrobox_sudo_program=${DBX_SUDO_PROGRAM:-"sudo"}
+
+show_help() {
+    cat << EOF
+lxcbox-rm version: ${version}
+
+Remove an lxcbox container.
+
+Usage:
+    lxcbox-rm mybox
+    lxcbox-rm --name mybox --force
+
+Options:
+    --name/-n:    container name
+    --force/-f:   do not ask for confirmation
+    --root/-r:    use rootful LXC
+    --verbose/-v: verbose
+    --help/-h:    this message
+EOF
+}
+
+while :; do
+    case $1 in
+        -h|--help)    show_help; exit 0 ;;
+        -v|--verbose) verbose=1; shift ;;
+        -f|--force)   force=1; shift ;;
+        -r|--root)    rootful=1; lxc_dir="/var/lib/lxc"; shift ;;
+        -n|--name)    [ -n "$2" ] && { container_name="$2"; shift 2; } ;;
+        --) shift; break ;;
+        -*) printf >&2 "ERROR: unknown flag '%s'\n" "$1"; exit 1 ;;
+        *)
+            if [ -n "$1" ] && [ -z "${container_name}" ]; then
+                container_name="$1"; shift
+            else break; fi ;;
+    esac
+done
+
+set -o errexit
+set -o nounset
+[ "${verbose}" -ne 0 ] && set -o xtrace
+
+if [ -z "${container_name}" ]; then
+    printf >&2 "ERROR: no container name.\n"; show_help; exit 1
+fi
+
+if [ ! -d "${lxc_dir}/${container_name}" ]; then
+    printf >&2 "ERROR: container '%s' not found.\n" "${container_name}"; exit 1
+fi
+
+# Confirm
+if [ "${force}" -eq 0 ]; then
+    printf >&2 "This will PERMANENTLY DELETE lxcbox '%s' and its rootfs.\n" "${container_name}"
+    printf >&2 "Snapshots will NOT be deleted automatically.\n"
+    printf >&2 "Are you sure? [y/N]: "
+    read -r response
+    case "${response}" in
+        y|Y|yes|Yes) ;;
+        *) printf >&2 "Aborted.\n"; exit 0 ;;
+    esac
+fi
+
+# Stop if running
+lxc_stop_cmd="lxc-stop"
+lxc_destroy_cmd="lxc-destroy"
+[ "${rootful}" -eq 1 ] && lxc_stop_cmd="${distrobox_sudo_program} lxc-stop"
+[ "${rootful}" -eq 1 ] && lxc_destroy_cmd="${distrobox_sudo_program} lxc-destroy"
+
+state="$(lxc-info -n "${container_name}" 2>/dev/null | grep "^State:" | awk '{print $2}' || echo "STOPPED")"
+if [ "${state}" = "RUNNING" ]; then
+    printf "Stopping '%s' ...\n" "${container_name}"
+    ${lxc_stop_cmd} -n "${container_name}" -t 10 2>/dev/null || true
+fi
+
+# Destroy (removes rootfs + config)
+${lxc_destroy_cmd} -n "${container_name}"
+
+# Remove metadata
+rm -f "${lxcbox_metadata_dir}/${container_name}"
+
+# Remove host app/bin exports
+for exported in "${HOME}/.local/share/applications/lxcbox-${container_name}-"*.desktop; do
+    [ -e "${exported}" ] && rm -f "${exported}"
+done
+for exported in "${HOME}/.local/bin/"*; do
+    [ -e "${exported}" ] || continue
+    grep -q "Container: ${container_name}" "${exported}" 2>/dev/null && rm -f "${exported}" || true
+done
+
+printf "\033[32m[ OK ]\033[0m lxcbox '%s' removed.\n" "${container_name}"

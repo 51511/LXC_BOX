@@ -1,0 +1,258 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# lxcbox-snapshot — create/restore/list LXC snapshots
+# Runs on the HOST (called via lxcbox-host-exec from inside container,
+# or directly by the user)
+#
+# Uses lxc-copy --snapshot (overlayfs-based snapshots, no ZFS needed)
+#
+# Called automatically by the apt pre-invoke hook in lxcbox-init:
+#   lxcbox-snapshot --auto <container_name>
+
+set -o errexit
+set -o nounset
+
+[ -z "${USER}" ]  && USER="$(id -run)"
+[ -z "${HOME}" ]  && HOME="$(getent passwd "${USER}" | cut -d':' -f6)"
+
+version="0.1.0"
+verbose=0
+rootful=0
+mode=""          # create | restore | list | delete | auto
+container_name=""
+snapshot_name=""
+
+[ "$(id -ru)" -eq 0 ] && rootful=1
+[ "${rootful}" -eq 1 ] \
+    && lxc_dir="/var/lib/lxc" \
+    || lxc_dir="${HOME}/.local/share/lxc"
+
+distrobox_sudo_program=${DBX_SUDO_PROGRAM:-"sudo"}
+
+# Snapshots live under lxc_dir/<container>-snap-<name>
+# "auto" snapshots: <container>-snap-auto-<epoch>
+# Keep last N auto snapshots
+MAX_AUTO_SNAPS=5
+
+show_help() {
+    cat << EOF
+lxcbox-snapshot version: ${version}
+
+Manage LXC snapshots for lxcbox containers.
+Runs on the HOST.
+
+Usage:
+    lxcbox-snapshot create   <container> [snapshot-name]
+    lxcbox-snapshot restore  <container> <snapshot-name>
+    lxcbox-snapshot list     <container>
+    lxcbox-snapshot delete   <container> <snapshot-name>
+    lxcbox-snapshot --auto   <container>   (called by apt hook)
+
+Options:
+    --root/-r:    use rootful LXC (/var/lib/lxc)
+    --verbose/-v: verbose
+    --help/-h:    this message
+
+Examples:
+    lxcbox-snapshot create mybox before-upgrade
+    lxcbox-snapshot restore mybox before-upgrade
+    lxcbox-snapshot list mybox
+    lxcbox-snapshot delete mybox before-upgrade
+EOF
+}
+
+# ── lxc wrapper (adds sudo if rootful) ───────────────────────────────────────
+lxc_copy()  { [ "${rootful}" -eq 1 ] && ${distrobox_sudo_program} lxc-copy  "$@" || lxc-copy  "$@"; }
+lxc_start() { [ "${rootful}" -eq 1 ] && ${distrobox_sudo_program} lxc-start "$@" || lxc-start "$@"; }
+lxc_stop()  { [ "${rootful}" -eq 1 ] && ${distrobox_sudo_program} lxc-stop  "$@" || lxc-stop  "$@"; }
+lxc_info()  { [ "${rootful}" -eq 1 ] && ${distrobox_sudo_program} lxc-info  "$@" || lxc-info  "$@"; }
+
+container_state() {
+    lxc_info -n "${container_name}" 2>/dev/null | grep "^State:" | awk '{print $2}' || echo "STOPPED"
+}
+
+# ── create snapshot ───────────────────────────────────────────────────────────
+cmd_create() {
+    if [ -z "${snapshot_name}" ]; then
+        snapshot_name="snap-$(date +%Y%m%d-%H%M%S)"
+    fi
+    snap_container="${container_name}-${snapshot_name}"
+
+    printf "Creating snapshot '%s' of '%s' ...\n" "${snapshot_name}" "${container_name}"
+
+    # lxc-copy --snapshot uses overlayfs — no full copy needed, instant.
+    # Container must be stopped for a consistent snapshot.
+    was_running=0
+    if [ "$(container_state)" = "RUNNING" ]; then
+        was_running=1
+        printf "Stopping container for snapshot ...\n"
+        lxc_stop -n "${container_name}" -t 10 2>/dev/null || true
+    fi
+
+    lxc_copy \
+        --snapshot \
+        --name "${container_name}" \
+        --newname "${snap_container}"
+
+    # Restart if it was running
+    if [ "${was_running}" -eq 1 ]; then
+        lxc_start -n "${container_name}" -d
+    fi
+
+    printf "\033[32m[ OK ]\033[0m Snapshot '%s' created.\n" "${snapshot_name}"
+    printf "To restore: lxcbox-snapshot restore %s %s\n" "${container_name}" "${snapshot_name}"
+}
+
+# ── restore snapshot ──────────────────────────────────────────────────────────
+cmd_restore() {
+    if [ -z "${snapshot_name}" ]; then
+        printf >&2 "ERROR: specify a snapshot name to restore.\n"
+        printf >&2 "List available: lxcbox-snapshot list %s\n" "${container_name}"
+        exit 1
+    fi
+    snap_container="${container_name}-${snapshot_name}"
+
+    if [ ! -d "${lxc_dir}/${snap_container}" ]; then
+        printf >&2 "ERROR: snapshot '%s' not found.\n" "${snap_container}"
+        exit 1
+    fi
+
+    printf "Restoring snapshot '%s' to '%s' ...\n" "${snapshot_name}" "${container_name}"
+
+    # Stop running container
+    if [ "$(container_state)" = "RUNNING" ]; then
+        lxc_stop -n "${container_name}" -t 10 2>/dev/null || true
+    fi
+
+    # Remove current container dir (preserve snapshot)
+    if [ "${rootful}" -eq 1 ]; then
+        ${distrobox_sudo_program} rm -rf "${lxc_dir}/${container_name}"
+    else
+        rm -rf "${lxc_dir:?}/${container_name}"
+    fi
+
+    # Clone snapshot back as the live container
+    lxc_copy \
+        --name "${snap_container}" \
+        --newname "${container_name}"
+
+    printf "\033[32m[ OK ]\033[0m Restored '%s' from snapshot '%s'.\n" \
+        "${container_name}" "${snapshot_name}"
+}
+
+# ── list snapshots ────────────────────────────────────────────────────────────
+cmd_list() {
+    printf "Snapshots for '%s':\n" "${container_name}"
+    found=0
+    for d in "${lxc_dir}/${container_name}"-snap-* "${lxc_dir}/${container_name}"-auto-snap-*; do
+        [ -d "${d}" ] || continue
+        snap="$(basename "${d}")"
+        snap_label="${snap#"${container_name}"-}"
+        created=""
+        [ -e "${d}/config" ] && created="$(stat -c '%y' "${d}/config" | cut -d'.' -f1)"
+        printf "  %-40s  %s\n" "${snap_label}" "${created}"
+        found=1
+    done
+    [ "${found}" -eq 0 ] && printf "  (none)\n"
+}
+
+# ── delete snapshot ───────────────────────────────────────────────────────────
+cmd_delete() {
+    if [ -z "${snapshot_name}" ]; then
+        printf >&2 "ERROR: specify a snapshot name to delete.\n"
+        exit 1
+    fi
+    snap_container="${container_name}-${snapshot_name}"
+    target="${lxc_dir}/${snap_container}"
+
+    if [ ! -d "${target}" ]; then
+        printf >&2 "ERROR: snapshot '%s' not found.\n" "${snap_container}"
+        exit 1
+    fi
+
+    printf "Deleting snapshot '%s' ...\n" "${snapshot_name}"
+    if [ "${rootful}" -eq 1 ]; then
+        ${distrobox_sudo_program} rm -rf "${target}"
+    else
+        rm -rf "${target}"
+    fi
+    printf "\033[32m[ OK ]\033[0m Deleted.\n"
+}
+
+# ── auto snapshot (called by apt hook) ───────────────────────────────────────
+# Creates a timestamped auto-snapshot and prunes old ones beyond MAX_AUTO_SNAPS.
+cmd_auto() {
+    snap_ts="$(date +%Y%m%d-%H%M%S)"
+    snapshot_name="auto-snap-${snap_ts}"
+    printf "[lxcbox-snapshot] apt hook: auto-snapshot '%s/%s' ...\n" \
+        "${container_name}" "${snapshot_name}"
+    cmd_create
+
+    # Prune old auto-snapshots
+    auto_snaps="$(
+        for d in "${lxc_dir}/${container_name}"-auto-snap-*; do
+            [ -d "${d}" ] && basename "${d}"
+        done | sort
+    )"
+    count="$(printf "%s\n" "${auto_snaps}" | grep -c . || true)"
+
+    if [ "${count}" -gt "${MAX_AUTO_SNAPS}" ]; then
+        to_delete="$(printf "%s\n" "${auto_snaps}" | head -n "$((count - MAX_AUTO_SNAPS))")"
+        for old in ${to_delete}; do
+            snapshot_name="${old#"${container_name}"-}"
+            printf "[lxcbox-snapshot] Pruning old auto-snapshot: %s ...\n" "${snapshot_name}"
+            cmd_delete
+        done
+    fi
+}
+
+# ── Argument parsing ──────────────────────────────────────────────────────────
+while :; do
+    case $1 in
+        -h|--help)    show_help; exit 0 ;;
+        -v|--verbose) verbose=1; shift ;;
+        -r|--root)    rootful=1; lxc_dir="/var/lib/lxc"; shift ;;
+        --auto)
+            mode="auto"
+            [ -n "$2" ] && { container_name="$2"; shift 2; } || shift
+            break ;;
+        create|restore|list|delete)
+            mode="$1"; shift
+            [ -n "${1:-}" ] && { container_name="$1"; shift; } || true
+            [ -n "${1:-}" ] && { snapshot_name="$1"; shift; } || true
+            break ;;
+        -*) printf >&2 "ERROR: unknown flag '%s'\n" "$1"; show_help; exit 1 ;;
+        *)
+            if [ -z "${mode}" ] && [ -n "${1:-}" ]; then
+                printf >&2 "ERROR: unknown command '%s'\n" "$1"
+                show_help; exit 1
+            fi
+            break ;;
+    esac
+done
+
+[ "${verbose}" -ne 0 ] && set -o xtrace
+
+if [ -z "${container_name}" ]; then
+    printf >&2 "ERROR: no container name specified.\n"
+    show_help; exit 1
+fi
+
+if [ -z "${mode}" ]; then
+    printf >&2 "ERROR: no command specified.\n"
+    show_help; exit 1
+fi
+
+# Verify container exists
+if [ ! -d "${lxc_dir}/${container_name}" ]; then
+    printf >&2 "ERROR: container '%s' not found in %s\n" "${container_name}" "${lxc_dir}"
+    exit 1
+fi
+
+case "${mode}" in
+    create)  cmd_create ;;
+    restore) cmd_restore ;;
+    list)    cmd_list ;;
+    delete)  cmd_delete ;;
+    auto)    cmd_auto ;;
+esac
