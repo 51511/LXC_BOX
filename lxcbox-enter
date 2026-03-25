@@ -138,7 +138,6 @@ env_flags="${env_flags} --set-var DBUS_SESSION_BUS_ADDRESS=unix:path=${xdg_runti
 env_flags="${env_flags} --set-var TERMINFO_DIRS=/usr/share/terminfo:/run/host/usr/share/terminfo"
 env_flags="${env_flags} --set-var DISPLAY=${DISPLAY:-:0}"
 env_flags="${env_flags} --set-var XAUTHORITY=${HOME}/.Xauthority"
-[ -n "${DISPLAY:-}" ] && env_flags="${env_flags} --set-var DISPLAY=${DISPLAY}"
 
 # ── Attach ────────────────────────────────────────────────────────────────────
 if [ -z "${enter_cmd}" ]; then
