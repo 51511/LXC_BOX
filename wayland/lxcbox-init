@@ -33,27 +33,27 @@ lxcbox-init version: ${version}
 Run inside the LXC container. Not meant to be called manually.
 
 Options:
-    --name:               username to create
-    --user:               UID
-    --group:              GID
-    --home:               home directory path
+    --name:              username to create
+    --user:              UID
+    --group:             GID
+    --home:              home directory path
     --additional-packages: space-separated package list
-    --pre-init-hooks:     shell commands before package install
-    -- HOOK:              shell commands after setup (init-hooks)
-    --verbose/-v:         verbose
-    --help/-h:            this message
+    --pre-init-hooks:    shell commands before package install
+    -- HOOK:             shell commands after setup (init-hooks)
+    --verbose/-v:        verbose
+    --help/-h:           this message
 EOF
 }
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 while :; do
     case $1 in
-        -h|--help)    show_help; exit 0 ;;
+        -h|--help)   show_help; exit 0 ;;
         -v|--verbose) verbose=1; shift ;;
-        --name)       [ -n "$2" ] && { user_name="$2";        shift 2; } ;;
-        --user)       [ -n "$2" ] && { user_uid="$2";         shift 2; } ;;
-        --group)      [ -n "$2" ] && { user_gid="$2";         shift 2; } ;;
-        --home)       [ -n "$2" ] && { user_home="$2";        shift 2; } ;;
+        --name)      [ -n "$2" ] && { user_name="$2";       shift 2; } ;;
+        --user)      [ -n "$2" ] && { user_uid="$2";        shift 2; } ;;
+        --group)     [ -n "$2" ] && { user_gid="$2";        shift 2; } ;;
+        --home)      [ -n "$2" ] && { user_home="$2";       shift 2; } ;;
         --additional-packages) [ -n "$2" ] && { additional_packages="$2"; shift 2; } ;;
         --pre-init-hooks)      [ -n "$2" ] && { pre_init_hook="$2";  shift 2; } ;;
         --) shift; init_hook="$*"; break ;;
@@ -109,6 +109,11 @@ first_run_setup() {
     if [ -n "${pre_init_hook}" ]; then
         log "Running pre-init hook ..."
         sh -c "${pre_init_hook}"
+    fi
+
+    # -- fix sudo unable to resolve host warning
+    if ! grep -q "$(hostname)" /etc/hosts 2>/dev/null; then
+        echo "127.0.1.1 $(hostname)" >> /etc/hosts
     fi
 
     # -- base packages every lxcbox needs
@@ -184,7 +189,7 @@ install_apt_snapshot_hook() {
 // lxcbox — auto-snapshot before apt operations
 // Calls lxcbox-snapshot on the host via lxcbox-host-exec
 DPkg::Pre-Invoke {
-    "if [ -x /usr/bin/lxcbox-host-exec ]; then /usr/bin/lxcbox-host-exec lxcbox-snapshot --auto \"${CONTAINER_ID}\" || true; fi";
+    "if [ -x /usr/bin/lxcbox-host-exec ]; then /usr/bin/lxcbox-host-exec lxcbox-snapshot --auto ${CONTAINER_ID:-} || true; fi";
 };
 APTHOOK
 }
