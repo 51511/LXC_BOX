@@ -4,7 +4,6 @@
 
 **下一代™ 革命性© 顛覆性® 容器桌面解決方案**
 （其實就是一堆 shell script）
-<iframe width="1353" height="761" src="https://www.youtube.com/embed/ekytFdKHGag" title="Running Debian Apps on Void Linux (No VM, No Docker)" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
 
 ![Picture1](https://i.meee.com.tw/qxZd5Rx.png)
 ![Picture2](https://i.meee.com.tw/rmKAY4O.png)
