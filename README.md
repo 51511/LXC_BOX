@@ -7,6 +7,9 @@
 
 ![Picture1](https://i.meee.com.tw/qxZd5Rx.png)
 ![Picture2](https://i.meee.com.tw/rmKAY4O.png)
+![Picture3](https://i.meee.com.tw/y0wFIAj.png)
+在2026/03/25，Wayland支援成功開發
+
 ---
 
 ## 這是什麼？
@@ -47,8 +50,6 @@ Void Linux Host（極簡、無 systemd、runit）
 - PipeWire（音效）
 - GPU driver
 
-**就這樣。沒有 systemd。沒有 snapd。良心~。**
-
 ---
 
 ## 為什麼不用 Distrobox？
@@ -58,8 +59,8 @@ Void Linux Host（極簡、無 systemd、runit）
 | 底層 | Podman（OCI）| LXC（直接）|
 | 層數 | 多到數不清 | 少 |
 | 文件 | 豐富 | 你在看的這個 |
-| 穩定性 | 高 | 🤞 |
-| systemd | 可能有 | 沒有（驕傲）|
+| 穩定性 | 高 | 誰知道？ |
+| systemd | 可能有 | 沒有|
 | 踩坑機率 | 低 | 很高（目前）|
 
 ---
@@ -101,6 +102,7 @@ firefox-esr
 
 # 9. 驚訝地發現它真的跑起來了
 ```
+(Wayland只要進去Wayland資料夾做一樣的事)
 
 ---
 
@@ -111,6 +113,20 @@ firefox-esr
 - Alpine Linux 不支援（musl + LXC 6.0 = segfault，我們學到了）
 - 如果炸了請重新閱讀本 README
 - 只支援Void Linux
+- Wayland下apt可能會炸，如下
+```
+sh: 1: Syntax error: "fi" unexpected
+E: Problem executing scripts DPkg::Pre-Invoke '\ || true; fi'
+```
+修復指令
+```
+sudo tee /etc/apt/apt.conf.d/01lxcbox-snapshot > /dev/null <<'EOF'
+DPkg::Pre-Invoke {
+    "sh -c 'if [ -x /usr/bin/lxcbox-host-exec ]; then /usr/bin/lxcbox-host-exec lxcbox-snapshot --auto || true; fi'";
+};
+EOF
+```
+
 ---
 
 ## 跟其他方案比較
@@ -133,7 +149,7 @@ lxcbox:           實驗性，可能炸，但架構乾淨
 - [x] CLI 能跑
 - [x] GUI 能跑（X11）
 - [x] Firefox 能跑
-- [ ] Wayland 完整支援
+- [x] Wayland 完整支援
 - [ ] 自動 snapshot（更新前自動備份）
 - [ ] 多 container 管理
 - [ ] `.desktop` export 完整支援
@@ -151,7 +167,6 @@ lxcbox:           實驗性，可能炸，但架構乾淨
 - **Container OS**: Debian bookworm
 - **GUI**: X11 / Wayland socket passthrough
 - **音效**: PipeWire socket passthrough
-- **信念**: 堅定
 
 ---
 
