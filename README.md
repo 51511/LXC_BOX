@@ -126,6 +126,7 @@ DPkg::Pre-Invoke {
 };
 EOF
 ```
+- 你說你顯卡是Nvida？好問題，我根本不知道可不可以跑
 
 ---
 
@@ -150,7 +151,7 @@ lxcbox:           實驗性，可能炸，但架構乾淨
 - [x] GUI 能跑（X11）
 - [x] Firefox 能跑
 - [x] Wayland 完整支援
-- [ ] 自動 snapshot（更新前自動備份）
+- [x] 自動 snapshot（更新前自動備份）
 - [ ] 多 container 管理
 - [ ] `.desktop` export 完整支援
 - [ ] 寫更多測試（或者至少假裝有測試）

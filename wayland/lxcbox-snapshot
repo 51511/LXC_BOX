@@ -124,17 +124,17 @@ cmd_restore() {
         lxc_stop -n "${container_name}" -t 10 2>/dev/null || true
     fi
 
-    # Remove current container dir (preserve snapshot)
+    # 使用 rsync 將快照的 rootfs 精準同步回原容器的 rootfs
+    # 這樣不會破壞其他快照對原容器的 lowerdir (基礎層) 依賴
     if [ "${rootful}" -eq 1 ]; then
-        ${distrobox_sudo_program} rm -rf "${lxc_dir}/${container_name}"
+        ${distrobox_sudo_program} rsync -aAX --delete \
+            "${lxc_dir}/${snap_container}/rootfs/" \
+            "${lxc_dir}/${container_name}/rootfs/"
     else
-        rm -rf "${lxc_dir:?}/${container_name}"
+        rsync -aAX --delete \
+            "${lxc_dir}/${snap_container}/rootfs/" \
+            "${lxc_dir}/${container_name}/rootfs/"
     fi
-
-    # Clone snapshot back as the live container
-    lxc_copy \
-        --name "${snap_container}" \
-        --newname "${container_name}"
 
     printf "\033[32m[ OK ]\033[0m Restored '%s' from snapshot '%s'.\n" \
         "${container_name}" "${snapshot_name}"
@@ -147,7 +147,7 @@ cmd_list() {
     for d in "${lxc_dir}/${container_name}"-snap-* "${lxc_dir}/${container_name}"-auto-snap-*; do
         [ -d "${d}" ] || continue
         snap="$(basename "${d}")"
-        snap_label="${snap#"${container_name}"-}"
+        snap_label="${snap#"${container_name}-"}"
         created=""
         [ -e "${d}/config" ] && created="$(stat -c '%y' "${d}/config" | cut -d'.' -f1)"
         printf "  %-40s  %s\n" "${snap_label}" "${created}"
@@ -199,7 +199,7 @@ cmd_auto() {
     if [ "${count}" -gt "${MAX_AUTO_SNAPS}" ]; then
         to_delete="$(printf "%s\n" "${auto_snaps}" | head -n "$((count - MAX_AUTO_SNAPS))")"
         for old in ${to_delete}; do
-            snapshot_name="${old#"${container_name}"-}"
+            snapshot_name="${old#"${container_name}-"}"
             printf "[lxcbox-snapshot] Pruning old auto-snapshot: %s ...\n" "${snapshot_name}"
             cmd_delete
         done
