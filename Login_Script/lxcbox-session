@@ -1,0 +1,56 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# lxcbox-session — 開機自動進入 lxcbox container
+# 放在用戶的 ~/.bash_profile 或 ~/.profile
+#
+# 行為：
+#   - 如果 debian container 不存在 → 建立 → 進入
+#   - 如果 debian container 存在   → 直接進入
+
+DEFAULT_CONTAINER="debian"
+
+[ -z "${USER}" ]  && USER="$(id -run)"
+[ -z "${HOME}" ]  && HOME="$(getent passwd "${USER}" | cut -d':' -f6)"
+
+lxc_dir="${HOME}/.local/share/lxc"
+# rootful fallback
+[ "$(id -ru)" -eq 0 ] && lxc_dir="/var/lib/lxc"
+
+# ── 避免在 container 裡面又跑這個 script ─────────────────────────────────────
+# lxcbox-enter 會設定 CONTAINER_ID
+[ -n "${CONTAINER_ID}" ] && return 0
+
+# ── 只在 login shell 跑 ───────────────────────────────────────────────────────
+# 避免每次開新 subshell 都觸發
+case "$-" in
+    *i*) ;;   # interactive shell，繼續
+    *)   return 0 ;;
+esac
+
+# ── 檢查 container 是否存在 ───────────────────────────────────────────────────
+container_exists() {
+    [ -d "${lxc_dir}/${DEFAULT_CONTAINER}" ]
+}
+
+# ── First boot：建立 container ────────────────────────────────────────────────
+if ! container_exists; then
+    echo ""
+    echo "  lxcbox: 第一次啟動，正在建立 Debian container..."
+    echo "  這需要幾分鐘，請耐心等待。"
+    echo ""
+
+    if ! lxcbox create --name "${DEFAULT_CONTAINER}"; then
+        echo ""
+        echo "  ERROR: container 建立失敗，請查看 /var/log/lxcbox-firstboot.log"
+        echo "  進入緊急 shell（Void Linux）..."
+        echo ""
+        return 1
+    fi
+
+    echo ""
+    echo "  container 建立完成，正在進入..."
+    echo ""
+fi
+
+# ── 進入 container ────────────────────────────────────────────────────────────
+exec lxcbox enter "${DEFAULT_CONTAINER}"

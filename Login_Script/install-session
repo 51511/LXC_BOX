@@ -1,0 +1,30 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# install-session — 把 lxcbox-session 裝進用戶 profile
+
+TARGET_USER="${1:-${SUDO_USER:-${USER}}}"
+TARGET_HOME="$(getent passwd "${TARGET_USER}" | cut -d':' -f6)"
+
+if [ -z "${TARGET_HOME}" ]; then
+    echo "ERROR: 找不到用戶 ${TARGET_USER} 的 home"
+    exit 1
+fi
+
+PROFILE="${TARGET_HOME}/.bash_profile"
+
+# 避免重複寫入
+if grep -q "lxcbox-session" "${PROFILE}" 2>/dev/null; then
+    echo "已經設定過了，跳過。"
+    exit 0
+fi
+
+cat >> "${PROFILE}" << 'EOF'
+
+# lxcbox-session: 自動進入 Debian container
+if [ -f /usr/lib/lxcbox/lxcbox-session ]; then
+    . /usr/lib/lxcbox/lxcbox-session
+fi
+EOF
+
+echo "完成：${PROFILE} 已設定 lxcbox-session"
+echo "下次登入時會自動進入 Debian container"
