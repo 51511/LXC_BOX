@@ -18,11 +18,19 @@ version="0.1.0"
     && lxc_dir="/var/lib/lxc" \
     || lxc_dir="${HOME}/.local/share/lxc"
 
-# sudo only needed if not root
-[ "${rootful}" -eq 0 ] && sudo_cmd="${DBX_SUDO_PROGRAM:-sudo}" || sudo_cmd=""
+# ── root 執行時警告 ───────────────────────────────────────────────────────────
+# lxc-attach 以 root 執行時不會切換 mount namespace，container 會看到 host rootfs
+# 應該用一般用戶執行
+if [ "${rootful}" -eq 1 ] && [ -n "${SUDO_USER:-}" ]; then
+    printf >&2 "WARNING: 請用一般用戶執行 lxcbox-enter，不要用 root/sudo\n"
+    printf >&2 "  改用: su - %s -c 'lxcbox enter %s'\n" "${SUDO_USER}" "${container_name}"
+fi
+
+sudo_cmd="${DBX_SUDO_PROGRAM:-sudo}"
+[ "${rootful}" -eq 1 ] && sudo_cmd=""
 
 show_help() {
-    cat << EOF
+    cat << HELPEOF
 lxcbox-enter version: ${version}
 
 Usage:
@@ -36,7 +44,7 @@ Options:
     --verbose/-v: show more output
     --help/-h:    this message
     -- CMD:       command to run instead of default shell
-EOF
+HELPEOF
 }
 
 while :; do
@@ -60,7 +68,6 @@ set -o errexit
 set -o nounset
 [ "${verbose}" -ne 0 ] && set -o xtrace
 
-# ── Validate ──────────────────────────────────────────────────────────────────
 if [ -z "${container_name}" ]; then
     printf >&2 "ERROR: no container name specified.\n"
     show_help; exit 1
@@ -72,17 +79,34 @@ if [ ! -d "${lxc_dir}/${container_name}" ]; then
     exit 1
 fi
 
-# ── cgroup — mount if missing ─────────────────────────────────────────────────
+# ── cgroup ────────────────────────────────────────────────────────────────────
 if [ ! -e /sys/fs/cgroup/cgroup.controllers ] && [ ! -e /sys/fs/cgroup/memory ]; then
     printf >&2 "Mounting cgroup2 ...\n"
     mount -t cgroup2 none /sys/fs/cgroup 2>/dev/null || true
 fi
 
-# ── XDG_RUNTIME_DIR — create if missing ──────────────────────────────────────
+# ── XDG_RUNTIME_DIR ───────────────────────────────────────────────────────────
 xdg_runtime="/run/user/${container_user_uid}"
 if [ ! -d "${xdg_runtime}" ]; then
     mkdir -p "${xdg_runtime}"
     chmod 700 "${xdg_runtime}"
+fi
+
+# ── Wayland socket ────────────────────────────────────────────────────────────
+# 確保 XDG_RUNTIME_DIR 權限允許 container 存取 Wayland socket
+# lxc-attach 會保留 mount namespace，所以 /run/user/<uid> 是共享的
+if [ -d "${xdg_runtime}" ]; then
+    chmod 755 "${xdg_runtime}" 2>/dev/null || true
+fi
+
+# 偵測 Wayland display
+wayland_display="${WAYLAND_DISPLAY:-}"
+if [ -z "${wayland_display}" ]; then
+    # 自動偵測
+    for wl in wayland-0 wayland-1; do
+        [ -S "${xdg_runtime}/${wl}" ] && { wayland_display="${wl}"; break; }
+    done
+    wayland_display="${wayland_display:-wayland-0}"
 fi
 
 # ── Start container if not running ───────────────────────────────────────────
@@ -95,7 +119,6 @@ state="$(container_status)"
 
 if [ "${state}" != "RUNNING" ]; then
     printf >&2 "Starting lxcbox '%s' ...\n" "${container_name}"
-    # shellcheck disable=SC2086
     ${sudo_cmd} lxc-start -n "${container_name}" -P "${lxc_dir}" -d
 
     i=0
@@ -111,8 +134,6 @@ if [ "${state}" != "RUNNING" ]; then
         exit 1
     fi
 
-    # Run lxcbox-init on first start (idempotent)
-    # shellcheck disable=SC2086
     ${sudo_cmd} lxc-attach -n "${container_name}" -P "${lxc_dir}" -- \
         /usr/bin/lxcbox-init \
             --name "${USER}" \
@@ -123,8 +144,6 @@ if [ "${state}" != "RUNNING" ]; then
 fi
 
 # ── Forward environment ───────────────────────────────────────────────────────
-wayland_display="${WAYLAND_DISPLAY:-wayland-0}"
-
 env_flags=""
 env_flags="${env_flags} --set-var TERM=${TERM:-xterm-256color}"
 env_flags="${env_flags} --set-var COLORTERM=${COLORTERM:-truecolor}"
@@ -138,10 +157,12 @@ env_flags="${env_flags} --set-var DBUS_SESSION_BUS_ADDRESS=unix:path=${xdg_runti
 env_flags="${env_flags} --set-var TERMINFO_DIRS=/usr/share/terminfo:/run/host/usr/share/terminfo"
 env_flags="${env_flags} --set-var DISPLAY=${DISPLAY:-:0}"
 env_flags="${env_flags} --set-var XAUTHORITY=${HOME}/.Xauthority"
+env_flags="${env_flags} --set-var LANG=zh_TW.UTF-8"
+env_flags="${env_flags} --set-var LC_ALL=zh_TW.UTF-8"
+env_flags="${env_flags} --set-var LOCPATH=/usr/lib/locale"
 
 # ── Attach ────────────────────────────────────────────────────────────────────
 if [ -z "${enter_cmd}" ]; then
-    # shellcheck disable=SC2086
     exec ${sudo_cmd} lxc-attach \
         -n "${container_name}" -P "${lxc_dir}" \
         --uid "${container_user_uid}" \
@@ -149,7 +170,6 @@ if [ -z "${enter_cmd}" ]; then
         ${env_flags} \
         -- "${SHELL}" -l
 else
-    # shellcheck disable=SC2086
     exec ${sudo_cmd} lxc-attach \
         -n "${container_name}" -P "${lxc_dir}" \
         --uid "${container_user_uid}" \

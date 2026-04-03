@@ -1,30 +1,154 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-only
-# install-session — 把 lxcbox-session 裝進用戶 profile
+# install-session — 安裝 lxcbox-session 到系統各個入口
+#
+# 使用方式：
+#   sudo ./install-session [USERNAME] [CONTAINER_NAME]
+#
+# 範例：
+#   sudo ./install-session void          # 用戶 void，container 名稱預設 debian
+#   sudo ./install-session void testbox  # 用戶 void，container 名稱 testbox
 
 TARGET_USER="${1:-${SUDO_USER:-${USER}}}"
+DEFAULT_CONTAINER="${2:-debian}"
 TARGET_HOME="$(getent passwd "${TARGET_USER}" | cut -d':' -f6)"
+INSTALL_LIB="/usr/lib/lxcbox/lxcbox-session"
+PROFILED="/etc/profile.d/lxcbox-session.sh"
+VOID_SHELL_BIN="/usr/local/bin/void-shell"
 
+# ── 檢查 ──────────────────────────────────────────────────────────────────────
 if [ -z "${TARGET_HOME}" ]; then
     echo "ERROR: 找不到用戶 ${TARGET_USER} 的 home"
     exit 1
 fi
-
-PROFILE="${TARGET_HOME}/.bash_profile"
-
-# 避免重複寫入
-if grep -q "lxcbox-session" "${PROFILE}" 2>/dev/null; then
-    echo "已經設定過了，跳過。"
-    exit 0
+if [ "$(id -ru)" -ne 0 ]; then
+    echo "ERROR: 請用 sudo 執行"
+    exit 1
 fi
 
-cat >> "${PROFILE}" << 'EOF'
+echo "=== lxcbox-session 安裝程式 ==="
+echo "目標用戶:      ${TARGET_USER}"
+echo "Home:          ${TARGET_HOME}"
+echo "Container:     ${DEFAULT_CONTAINER}"
+echo ""
 
-# lxcbox-session: 自動進入 Debian container
-if [ -f /usr/lib/lxcbox/lxcbox-session ]; then
-    . /usr/lib/lxcbox/lxcbox-session
+# ── Step 1：把 lxcbox-session 裝到 /usr/lib/lxcbox/ ─────────────────────────
+echo "[1/5] 安裝 lxcbox-session 到 ${INSTALL_LIB}..."
+mkdir -p /usr/lib/lxcbox
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cp "${SCRIPT_DIR}/lxcbox-session" "${INSTALL_LIB}"
+chmod 644 "${INSTALL_LIB}"
+echo "      完成"
+
+# ── Step 2：寫入用戶的 container 名稱設定 ────────────────────────────────────
+echo "[2/5] 設定預設 container 名稱..."
+echo "${DEFAULT_CONTAINER}" > "${TARGET_HOME}/.lxcbox_default"
+chown "${TARGET_USER}:${TARGET_USER}" "${TARGET_HOME}/.lxcbox_default"
+echo "      ${TARGET_HOME}/.lxcbox_default = ${DEFAULT_CONTAINER}"
+
+# ── Step 3：/etc/profile.d/ 覆蓋所有 login shell（TTY / SSH）────────────────
+echo "[3/5] 安裝 ${PROFILED}..."
+cat > "${PROFILED}" << PROFEOF
+#!/bin/sh
+# lxcbox-session: 自動進入 LXC container
+# 由 install-session 產生，勿手動修改
+
+# 只對 ${TARGET_USER} 生效
+[ "\$(id -un)" != "${TARGET_USER}" ] && return 0
+
+if [ -f ${INSTALL_LIB} ]; then
+    . ${INSTALL_LIB}
 fi
-EOF
+PROFEOF
+chmod 644 "${PROFILED}"
+echo "      完成"
 
-echo "完成：${PROFILE} 已設定 lxcbox-session"
-echo "下次登入時會自動進入 Debian container"
+# ── Step 4：~/.bashrc 覆蓋 terminal emulator（圖形介面）─────────────────────
+echo "[4/5] 設定 ${TARGET_HOME}/.bashrc..."
+BASHRC="${TARGET_HOME}/.bashrc"
+if grep -q "lxcbox-session" "${BASHRC}" 2>/dev/null; then
+    echo "      .bashrc 已設定，跳過"
+else
+    cat >> "${BASHRC}" << BASHEOF
+
+# lxcbox-session: 自動進入 LXC container（terminal emulator 用）
+if [ -f ${INSTALL_LIB} ]; then
+    . ${INSTALL_LIB}
+fi
+BASHEOF
+    chown "${TARGET_USER}:${TARGET_USER}" "${BASHRC}"
+    echo "      完成"
+fi
+
+# ── Step 5：安裝 void-shell 指令 ─────────────────────────────────────────────
+echo "[5/6] 安裝 void-shell 指令到 ${VOID_SHELL_BIN}..."
+cat > "${VOID_SHELL_BIN}" << 'VOIDEOF'
+#!/bin/sh
+# void-shell — 跳過 lxcbox，進入 Void 原生 shell
+export LXCBOX_SKIP=1
+export _LXCBOX_SESSION_LOADED=1
+
+echo ""
+echo "  ┌─────────────────────────────────────────────┐"
+echo "  │   Void Linux 原生 Shell                     │"
+echo "  │   輸入 'exit' 回到 lxcbox session           │"
+echo "  │   輸入 'lxcbox enter <name>' 手動進入 container │"
+echo "  └─────────────────────────────────────────────┘"
+echo ""
+
+exec /bin/bash --norc --noprofile
+VOIDEOF
+chmod 755 "${VOID_SHELL_BIN}"
+echo "      完成"
+
+# ── Step 6：GRUB 加「Void Terminal」選項 ─────────────────────────────────────
+echo "[6/6] 設定 GRUB..."
+
+ROOT_PART="$(findmnt -n -o SOURCE /)"
+ROOT_UUID="$(blkid -s UUID -o value "${ROOT_PART}" 2>/dev/null)"
+# 取最新版 kernel（版本號最大）
+VMLINUZ="$(ls /boot/vmlinuz-* 2>/dev/null | sort -V | tail -1 | sed 's|/boot/||')"
+INITRD="$(ls /boot/initramfs-*.img /boot/initrd-*.img /boot/initrd.img-* 2>/dev/null | sort -V | tail -1 | sed 's|/boot/||')"
+
+echo "      偵測到："
+echo "        ROOT_UUID = ${ROOT_UUID}"
+echo "        vmlinuz   = ${VMLINUZ}"
+echo "        initrd    = ${INITRD}"
+
+if [ -z "${VMLINUZ}" ] || [ -z "${ROOT_UUID}" ] || [ -z "${INITRD}" ]; then
+    echo "      ERROR: 無法自動偵測，請手動加入 GRUB entry"
+else
+    GRUB_CUSTOM="/etc/grub.d/40_custom"
+    if grep -q "Void Terminal" "${GRUB_CUSTOM}" 2>/dev/null; then
+        echo "      GRUB entry 已存在，跳過"
+    else
+        cat >> "${GRUB_CUSTOM}" << GRUBEOF
+
+menuentry "Void Linux — Void Terminal (不進 LXC)" {
+    search --no-floppy --fs-uuid --set=root ${ROOT_UUID}
+    linux   /boot/${VMLINUZ} root=UUID=${ROOT_UUID} rw quiet lxcbox_skip=1
+    initrd  /boot/${INITRD}
+}
+GRUBEOF
+        echo "      GRUB entry 寫入完成，正在更新 grub.cfg..."
+        grub-mkconfig -o /boot/grub/grub.cfg \
+            && echo "      grub.cfg 更新完成" \
+            || echo "      WARNING: grub-mkconfig 失敗，請手動執行"
+    fi
+fi
+
+# ── 完成 ──────────────────────────────────────────────────────────────────────
+echo ""
+echo "=== 安裝完成 ==="
+echo ""
+echo "  效果："
+echo "  ✓ TTY / SSH 登入      → 自動進入 lxcbox '${DEFAULT_CONTAINER}'"
+echo "  ✓ 圖形 terminal       → 自動進入 lxcbox '${DEFAULT_CONTAINER}'"
+echo "  ✓ 輸入 void-shell     → 回到 Void 原生 shell"
+echo "  ✓ GRUB「Void Terminal」→ 整個 session 跳過 lxcbox"
+echo ""
+echo "  換 container 名稱："
+echo "    echo 'mybox' > ~/.lxcbox_default"
+echo "    或重新執行: sudo ./install-session ${TARGET_USER} mybox"
+echo ""
+echo "  下次登入後生效。"

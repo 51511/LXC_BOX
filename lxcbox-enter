@@ -134,6 +134,10 @@ env_flags="${env_flags} --set-var SHELL=${SHELL}"
 env_flags="${env_flags} --set-var CONTAINER_ID=${container_name}"
 env_flags="${env_flags} --set-var XDG_RUNTIME_DIR=${xdg_runtime}"
 env_flags="${env_flags} --set-var WAYLAND_DISPLAY=${wayland_display}"
+env_flags="${env_flags} --set-var LC_ALL=zh_TW.UTF-8"
+env_flags="${env_flags} --set-var LOCPATH=/usr/lib/locale"
+env_flags="${env_flags} --set-var LC_ALL=zh_TW.UTF-8"
+env_flags="${env_flags} --set-var LOCPATH=/usr/lib/locale"
 env_flags="${env_flags} --set-var DBUS_SESSION_BUS_ADDRESS=unix:path=${xdg_runtime}/bus"
 env_flags="${env_flags} --set-var TERMINFO_DIRS=/usr/share/terminfo:/run/host/usr/share/terminfo"
 env_flags="${env_flags} --set-var DISPLAY=${DISPLAY:-:0}"
@@ -142,7 +146,7 @@ env_flags="${env_flags} --set-var XAUTHORITY=${HOME}/.Xauthority"
 # ── Attach ────────────────────────────────────────────────────────────────────
 if [ -z "${enter_cmd}" ]; then
     # shellcheck disable=SC2086
-    exec ${sudo_cmd} lxc-attach \
+    exec ${sudo_cmd} lxc-attach --namespaces "MOUNT|PID|UTS|IPC|NET" \
         -n "${container_name}" -P "${lxc_dir}" \
         --uid "${container_user_uid}" \
         --gid "${container_user_gid}" \
@@ -150,7 +154,7 @@ if [ -z "${enter_cmd}" ]; then
         -- "${SHELL}" -l
 else
     # shellcheck disable=SC2086
-    exec ${sudo_cmd} lxc-attach \
+    exec ${sudo_cmd} lxc-attach --namespaces "MOUNT|PID|UTS|IPC|NET" \
         -n "${container_name}" -P "${lxc_dir}" \
         --uid "${container_user_uid}" \
         --gid "${container_user_gid}" \
